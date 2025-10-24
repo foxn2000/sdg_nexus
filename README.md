@@ -19,7 +19,6 @@ conda create --name sdg python=3.10
 conda activate sdg
 pip install -U pip
 pip install -r requirements.txt
-# もしくは
 pip install -e .
 ```
 
