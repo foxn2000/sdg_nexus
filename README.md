@@ -15,7 +15,7 @@ OpenAI API互換の推論バックエンド（OpenAI / vLLM / SGLang 等、`base
 
 ## インストール
 ```bash
-conda create --name sdg python=3.11
+conda create --name sdg python=3.10
 conda activate sdg
 pip install -U pip
 pip install -r requirements.txt
@@ -61,6 +61,7 @@ sdg run --yaml examples/sdg_demo.yaml --input examples/data/input.csv --output o
 - `--save-intermediate` を指定すると、中間生成物も含めます（デバッグ用途）。
 
 ## 注意事項
+- 内部実装は OpenAI Python SDK (openai>=1.40) を使用します。OpenAI互換サーバーへ接続する場合は `models[].base_url` にベースURL（末尾に /v1 を含まなくても可。自動で `/v1` を付与）を指定してください。
 - `python` ブロックの `venv_path` は無視し、**実行中のPython環境**で `code_path` を動的importします。
 - OpenAIの [Batches API] ではなく、**同時並行HTTP呼び出し**でスループットを稼ぐ設計です。
 - vLLM/SGLang など **OpenAI互換エンドポイント** を `models[].base_url` で指定してください。
