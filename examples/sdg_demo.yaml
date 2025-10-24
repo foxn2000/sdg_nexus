@@ -1,0 +1,76 @@
+mabel:
+  version: "1.0"
+models:
+  - name: planner
+    api_model: gpt-4o-mini
+    api_key: ${ENV.OPENAI_API_KEY}
+    base_url: https://api.openai.com/v1
+    request_defaults:
+      temperature: 0.2
+      max_tokens: 300
+  - name: writer
+    api_model: gpt-4.1
+    api_key: ${ENV.OPENAI_API_KEY}
+    base_url: https://api.openai.com/v1
+    request_defaults:
+      temperature: 0.3
+      top_p: 0.95
+      max_tokens: 700
+blocks:
+  - type: ai
+    exec: 1
+    model: planner
+    system_prompt: |
+      You are a helpful assistant who formulates concise questions.
+    prompts:
+      - |
+          Summarize the key question from the following input:
+          {UserInput}
+    outputs:
+      - name: Question
+        select: full
+    params:
+      temperature: 0.1
+
+  - type: ai
+    exec: 2
+    model: writer
+    system_prompt: |
+      You answer questions clearly and accurately.
+    prompts:
+      - |
+          Provide a detailed answer to the following question:
+          {Question}
+    outputs:
+      - name: Answer
+        select: full
+      - name: ShortAnswer
+        select: regex
+        regex: "(?s)^(.+?)\n"
+
+  - type: logic
+    exec: 3
+    name: CheckAnswer
+    op: if
+    cond: {"equals": ["{ShortAnswer}", ""]}
+    then: "No short answer generated."
+    else: "Short answer available."
+    outputs:
+      - name: Flag
+        from: boolean
+
+  - type: python
+    exec: 4
+    name: format_result
+    function: format_output
+    inputs: [Answer, Flag]
+    code_path: examples/helpers.py
+    outputs: [Formatted]
+
+  - type: end
+    exec: 5
+    final:
+      - name: answer
+        value: "{Formatted}"
+      - name: status
+        value: "{Flag}"

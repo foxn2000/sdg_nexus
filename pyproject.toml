@@ -1,0 +1,19 @@
+[project]
+name = "sdg"
+version = "0.1.0"
+description = "SDG (Scalable Data Generator): YAML-driven, OpenAI-compatible batch data generator/transformer."
+authors = [{name="SDG Team"}]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0.1",
+    "httpx>=0.27.0",
+    "tqdm>=4.66.0",
+]
+
+[project.scripts]
+sdg = "sdg.cli:main"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
