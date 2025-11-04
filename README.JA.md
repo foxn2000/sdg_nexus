@@ -1,310 +1,437 @@
-# SDG‑Nexus (Scalable Data Generator — Nexus)
+# SDG Nexus
 
-[English README](README.md)
-
-SDG‑Nexus は、LLM（大規模言語モデル）を用いたデータ生成／加工を YAML 設計図で定義し、JSONL/CSV の入力データに対してスケーラブルに実行する CLI ツール兼 Python ライブラリです。OpenAI 互換の推論エンドポイント（OpenAI / vLLM / SGLang など、`/v1/chat/completions` API）に対応し、遅延とエラー率に基づいて同時並行実行数（バッチサイズ）を自動調整する適応型の並行制御を備えています。
-
-注: 本実装は、MABEL Studio v1.1 と互換のある YAML 仕様サブセット（models / blocks / connections 等）をサポートします。下記の例と仕様メモを参照してください。
+**v2.0仕様**をサポートしたMABEL（Model And Blocks Expansion Language）ベースのAIエージェントシステム
 
 ## 特徴
 
-- YAML 設計図のロードと基本検証（特に `models` / `blocks` を中心）
-- `ai` / `logic` / `python` / `end` ブロックの実行エンジン
-- OpenAI 互換の Chat Completions（`/v1/chat/completions`）に対応
-- 適応型並行実行: 遅延とエラー率に応じてバッチサイズを自動で増減
-- JSONL/CSV をレコード単位で処理し、最終結果を JSONL に保存
-- デバッグ用途で中間生成物を保存可能（`--save-intermediate`）
+### MABEL v2.0 サポート
+- **MEX式言語**: チューリング完全な式評価
+- **グローバル変数**: `globals.const`と`globals.vars`による定数とミュータブル変数
+- **高度な論理演算子**:
+  - `set`: MEX式による変数代入
+  - `while`: バジェット制御付き条件ループ
+  - `emit`: ループ内での値収集
+  - 完全なMEX演算子: 算術、比較、文字列、コレクション、正規表現など
+- **インラインPython関数**: YAML内でPythonコードを直接定義（`function_code`）
+- **強化されたPython統合**: `vars`、`get`、`set`、`log`を持つコンテキストオブジェクト（`ctx`）
+- **バジェット制御**: `budgets`設定によるループ/再帰の制限
+- **強化されたAI出力**:
+  - JSONPathサポート（`select: jsonpath`）
+  - 型ヒント（`type_hint: number|boolean|json`）
+  - 変数への保存（`save_to.vars`）
+
+### MABEL v1.x 互換性
+- 完全な後方互換性を維持
+- `mabel.version`からの自動バージョン検出
+- v1.0 YAMLファイルは変更なしで動作
+
+### コア機能
+- **バッチ処理**: 最適化された並行AI API呼び出し
+- **適応型バッチング**: レイテンシに基づく動的バッチサイズ調整
+- **マルチモデルサポート**: 複数のLLMモデルを定義・使用
+- **柔軟なI/O**: JSONLとCSVのサポート
+- **エラーハンドリング**: 設定可能なエラー処理（`fail`、`continue`、`retry`）
 
 ## インストール
 
-要件: Python >= 3.10
-
-方法 A: ローカル編集（editable）インストール
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -U pip
-pip install -r requirements.txt
 pip install -e .
 ```
 
-方法 B: 通常インストール（ローカル編集なし）
-```bash
-pip install -U pip
-pip install -r requirements.txt
-pip install .
-```
-
-CLI エントリーポイント `sdg` は `pyproject.toml` で提供されます。
-
 ## クイックスタート
 
-1) 認証情報の設定
+### v2.0 の例
 
-- OpenAI を使用する場合:
-  - シェルで `OPENAI_API_KEY` をエクスポートしてください。
-- OpenAI 互換サーバ（vLLM / SGLang 等）を使用する場合:
-  - `models[].base_url` にサーバの URL を設定します。
-  - `models[].api_key` に API キーを設定します。`${ENV.OPENAI_API_KEY}` と書いた場合、実行時に環境変数 `OPENAI_API_KEY` が使用されます（現実装は `${ENV.***}` の中身に関わらず `OPENAI_API_KEY` 固定で参照します）。
-
-2) サンプルの実行
-```bash
-sdg run \
-  --yaml examples/sdg_demo.yaml \
-  --input examples/data/input.jsonl \
-  --output out/output.jsonl \
-  --max-batch 8 --min-batch 1
-```
-
-- 各 JSONL レコード（`UserInput` を含む）に対し、`ai -> ai -> logic -> python -> end` のパイプラインを実行し、`out/output.jsonl` に最終結果を書き出します。
-
-3) CSV 入力の例
-```bash
-sdg run \
-  --yaml examples/sdg_demo.yaml \
-  --input examples/data/input.csv \
-  --output out/out.jsonl
-```
-
-## CLI リファレンス
-
-推奨（サブコマンド）:
-```text
-sdg run --yaml PATH --input PATH --output PATH [options]
-```
-
-オプション:
-- `--yaml`（必須）: YAML 設計図のパス
-- `--input`（必須）: 入力データセット（.jsonl または .csv）
-- `--output`（必須）: 出力 JSONL ファイル
-- `--max-batch`（int, 既定 8）: 最大同時実行数
-- `--min-batch`（int, 既定 1）: 最小同時実行数
-- `--target-latency-ms`（int, 既定 3000）: 目標平均レイテンシ（ミリ秒）
-- `--save-intermediate`（フラグ）: 中間結果を保存
-
-後方互換のレガシーモードも利用可能:
-```bash
-sdg --yaml ... --input ... --output ...
-```
-
-## 入出力フォーマット
-
-- JSONL 入力: 1 行に 1 つの JSON オブジェクト。各キーは後続ブロックのテンプレートで参照可能になります。
-  - 例: `{"UserInput": "What is the capital of Japan?"}`
-
-- CSV 入力: 先頭行をヘッダとして読み込み、各行を文字列値の辞書に変換します。
-
-- 出力: 既定では、各レコードについて `end` ブロックの `final` で指定したフィールドを 1 行の JSON として書き出します。
-
-- 中間出力: `--save-intermediate` を付けると、各ブロックの値を `_{exec}_{name}`（例: `_2_ShortAnswer`）というキーでレコードごとに格納します。
-
-## YAML 設計図（サポートされるサブセット）
-
-トップレベル:
 ```yaml
-mabel: { version: "1.0" }     # 任意
-models: [ ... ]               # 必須
-blocks:  [ ... ]              # 必須
-connections: [ ... ]          # 解析のみ、将来拡張予約
-```
+mabel:
+  version: "2.0"
 
-### models
+globals:
+  const:
+    APP_NAME: "My Agent"
+  vars:
+    counter: 0
 
-`ai` ブロックから `name` で参照されます。
+budgets:
+  loops:
+    max_iters: 100
+    on_exceed: "error"
 
-フィールド:
-- `name` (str): モデル識別子
-- `api_model` (str): バックエンド側のモデル名（例: `gpt-4o-mini`, `phi4-mini` 等）
-- `api_key` (str): API キー。`${ENV.OPENAI_API_KEY}` と書くと、環境変数 `OPENAI_API_KEY` を使用（注: 現行実装は `${ENV.***}` の変数名を解釈せず、`OPENAI_API_KEY` 固定）
-- `base_url` (str, 任意): ベース URL。末尾が `/v1` でなければ自動的に付与（例: `http://127.0.0.1:8000` → `http://127.0.0.1:8000/v1`）
-- `organization` (str, 任意): OpenAI の組織 ID（必要な場合）
-- `headers` (map, 任意): ベンダ固有の追加ヘッダ（標準ヘッダは SDK が処理）
-- `request_defaults` (map, 任意): 各 `ai` 呼び出しにマージされる既定パラメータ  
-  - 代表例: `temperature`, `top_p`, `max_tokens`, `timeout_sec`, `retry`  
-  - `retry` 構造:
-    ```yaml
-    retry:
-      max_attempts: 3
-      backoff:
-        initial_ms: 250
-        factor: 2.0
-    ```
-
-例:
-```yaml
 models:
-  - name: writer
+  - name: gpt4
     api_model: gpt-4o-mini
-    api_key: "${ENV.OPENAI_API_KEY}"
-    base_url: https://api.openai.com
-    headers:
-      HTTP-Referer: "https://your-app.example"
+    api_key: ${ENV.OPENAI_API_KEY}
+    request_defaults:
+      temperature: 0.0
+      max_tokens: 500
+
+blocks:
+  # MEX式で変数を設定
+  - type: logic
+    exec: 1
+    op: set
+    var: counter
+    value: {"add": [{"var": "counter"}, 1]}
+  
+  # whileループ
+  - type: logic
+    exec: 2
+    op: while
+    init:
+      - op: set
+        var: i
+        value: 0
+    cond:
+      lt:
+        - {"var": "i"}
+        - 5
+    step:
+      - op: set
+        var: i
+        value: {"add": [{"var": "i"}, 1]}
+      - op: emit
+        value: {"var": "i"}
+    outputs:
+      - name: Numbers
+        from: list
+  
+  # インラインPython
+  - type: python
+    exec: 3
+    entrypoint: process
+    function_code: |
+      def process(ctx, numbers: list) -> dict:
+          ctx.log("info", f"Processing {len(numbers)} numbers")
+          total = sum(numbers)
+          return {"Sum": total}
+    inputs:
+      numbers: "{Numbers}"
+    outputs: [Sum]
+  
+  - type: end
+    exec: 100
+    final:
+      - name: result
+        value: "{Sum}"
+    include_vars:
+      - counter
+```
+
+### v1.0 の例（引き続きサポート）
+
+```yaml
+mabel:
+  version: "1.0"
+
+models:
+  - name: planner
+    api_model: gpt-4o-mini
+    api_key: ${ENV.OPENAI_API_KEY}
     request_defaults:
       temperature: 0.2
-      top_p: 0.95
-      max_tokens: 400
-      timeout_sec: 60
-      retry:
-        max_attempts: 3
-        backoff: { initial_ms: 250, factor: 2.0 }
+
+blocks:
+  - type: ai
+    exec: 1
+    model: planner
+    prompts:
+      - "要約: {UserInput}"
+    outputs:
+      - name: Summary
+        select: full
+  
+  - type: end
+    exec: 2
+    final:
+      - name: answer
+        value: "{Summary}"
 ```
 
-パラメータの優先順位: `request_defaults`（モデル側）と `params`（ブロック側）はマージされ、ブロック側 `params` が優先されます。
+## 使用方法
 
-### blocks
+### コマンドライン
 
-`exec` の昇順で実行されます。共通:
-- `exec` (int): 実行順序
-- `run_if` (オブジェクトまたは JSON 文字列, 任意): 偽の場合、そのレコードではスキップ
-- `on_error` (`fail` | `continue`, 既定 `fail`): ブロック失敗時に継続するか
+```bash
+# JSONL入力の処理
+sdg run \
+  --yaml examples/sdg_demo_v2.yaml \
+  --input examples/data/input.jsonl \
+  --output output/result.jsonl
 
-サポートされるブロック種別:
-
-#### ai
-
-フィールド:
-- `type: ai`
-- `model` (str): `models` 内の `name`
-- `system_prompt` (str, 任意): レコード文脈でテンプレート展開
-- `prompts` (list[str]): テンプレート展開後に結合してユーザメッセージとして送信
-- `outputs` (list[OutputDef], 任意): LLM 応答から値を抽出  
-  - `name` (str): 出力変数名  
-  - `select` (`full` | `tag` | `regex`): 抽出モード  
-  - `tag` (str, `tag` 時必須): `<tag> ... </tag>`（大文字小文字無視・複数行対応）で抽出  
-  - `regex` (str, `regex` 時必須): Python 正規表現。キャプチャ群があれば group(1)、なければマッチ全体  
-  - `join_with` (str, 任意): 複数値を 1 つの文字列に結合する区切り
-- `params` (map, 任意): 呼び出しごとの上書き（例: `temperature`, `max_tokens`, `timeout_sec`, `retry`）
-
-`outputs` を省略した場合の既定:
-```yaml
-outputs:
-  - name: full
-    select: full
+# カスタムバッチ設定を使用
+sdg run \
+  --yaml examples/sdg_demo_v2.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --max-batch 16 \
+  --min-batch 2 \
+  --target-latency 2000
 ```
 
-#### logic
-
-フィールド:
-- `type: logic`
-- `name` (str, 任意)
-- `op` (`if` | `and` | `or` | `not` | `for`)
-- `cond` (object): `if` 用の条件（JSON オブジェクト）  
-  - 対応: `equals`, `not_equals`, `contains`, `is_empty`, `gt`, `lt`, `gte`, `lte`  
-  - 論理合成: `and`, `or`, `not`  
-  - オペランドはテンプレート展開後に比較
-- `then`, `else` (str, 任意): `if` のテキスト結果
-- `operands` (list): `and`/`or`/`not` のオペランド
-- 繰り返し（`op: for`）:
-  - `list` (str): 文脈上のリスト（またはカンマ区切り文字列）名
-  - `parse` (str, 任意: `"regex"` 指定で正規表現パース。省略時はカンマ区切り）
-  - `regex_pattern` (str): `parse: regex` のときのパターン
-  - `var` (str, 任意): ループ変数名（既定 `"item"`）
-  - `drop_empty` (bool, 任意): 空要素を除去
-  - `where` (object): 各要素に適用する条件（`cond` と同等の演算子）
-  - `map` (str): 各要素に適用するテンプレート（例: `"* {item}"`）
-- `outputs` (list of map): op ごとの出力定義  
-  - `if` の場合:  
-    - `name`: 出力キー  
-    - `from`: `boolean` | `text` | `source`  
-      - `boolean` → 真偽値  
-      - `text` → `then`/`else` の文字列  
-      - `source` → 文脈から指定名の値をコピー（`source: FieldName`）
-  - `and`/`or`/`not` の場合:  
-    - `name`: 出力キー。値は真偽結果
-  - `for` の場合:  
-    - `name`: 出力キー  
-    - `join_with` (str, 任意): リストを結合して文字列化  
-    - `limit` (int, 任意), `offset` (int, 任意)
-
-#### python
-
-フィールド:
-- `type: python`
-- `name` (str, 任意)
-- `function` (str, 必須): `code_path` 内の関数名
-- `inputs` (list[str]): 文脈から位置引数として渡すフィールド名
-- `code_path` (str): 動的にロードする Python ファイルのパス
-- `venv_path` (無視): 実行中の Python 環境を使用
-- `outputs` (list[str]): 関数の戻り値を文脈へマップ  
-  - 戻り値が dict の場合 → 指定したキーのみ抽出  
-  - 非 dict の場合 → 値（単一または list/tuple）を位置対応でマップ
-
-#### end
-
-フィールド:
-- `type: end`
-- `final` (list of `{ name, value }`): テンプレートを評価し、最終 JSONL に書き出すフィールド
-- `exit_code` (str, 任意)
-- `reason` (str, 任意)
-
-### テンプレートと抽出ヘルパ
-
-- テンプレート: `{VarName}` や `{foo.bar}` のように参照可能。欠損キーは空文字になります。
-- タグ抽出: `<tag> ... </tag>`（大文字小文字無視・複数行）
-- 正規表現抽出: キャプチャ群があれば group(1)、なければマッチ全体
-
-## 適応型並行実行（バッチ最適化）
-
-各 `ai` ラウンドで複数レコードを処理する際、平均レイテンシとエラー数を計測し、同時実行数を調整します。
-- エラーが発生、または平均レイテンシが `--target-latency-ms` を超過 → `--min-batch` まで段階的に削減
-- 安定かつ速い → `--max-batch` まで段階的に増加
-
-これにより、スループットを高めつつ、レート制限やサーバ遅延に頑健になります。
-
-## バックエンド（OpenAI 互換）
-
-- OpenAI Python SDK (>= 1.40) を使用し、`base_url` を差し替え可能
-- `base_url` が `/v1` で終わらない場合、自動で `/v1` を付与
-- ベンダ固有の追加ヘッダは `models[].headers` に設定可能（標準ヘッダは SDK が管理）
-
-例:
-- OpenAI: `base_url: https://api.openai.com`
-- vLLM プロキシ: `base_url: http://127.0.0.1:8000`
-- SGLang: `base_url: http://127.0.0.1:30000`
-
-注: 本プロジェクトは OpenAI の Batches API ではなく、通常の HTTP チャット呼び出しの並行化でスループットを最適化します。
-
-## Python からの利用
+### Python API
 
 ```python
-from sdg.runner import run
+from sdg.config import load_config
+from sdg.executors import run_pipeline
+import asyncio
 
-run(
-    yaml_path="examples/sdg_demo.yaml",
-    input_path="examples/data/input.jsonl",
-    output_path="out/output.jsonl",
-    max_batch=8,
-    min_batch=1,
-    target_latency_ms=3000,
-    save_intermediate=False,
-)
+# 設定の読み込み
+cfg = load_config("pipeline.yaml")
+
+# データセットの準備
+dataset = [
+    {"UserInput": "AIとは何ですか？"},
+    {"UserInput": "機械学習を説明してください"}
+]
+
+# パイプラインの実行
+results = asyncio.run(run_pipeline(cfg, dataset))
+
+for result in results:
+    print(result)
 ```
 
-## サンプル設計図
+## MABEL v2 アーキテクチャ
 
-`examples/sdg_demo.yaml` は、以下を示す実行可能な例です:
-- 2 つの `ai` ブロック（`planner` → `writer`）
-- 短文回答の有無を確認する `logic` ブロック
-- 回答を整形する `python` ブロック（`examples/helpers.py`）
-- 最終フィールドを選択する `end` ブロック
+### MEX式言語
 
-## エラーハンドリング
+MEXは安全でチューリング完全な式言語を提供します:
 
-- ブロックレベルのエラー:
-  - 既定は `on_error: fail` で、パイプラインを停止して例外を送出します。
-  - `on_error: continue` を設定すると処理を継続し、レコード文脈に `error_block_{exec}`（例: `error_block_2`）というキーでエラー文字列が入ります。
-- 条件付き実行:
-  - `run_if` が偽と評価されたレコードでは、そのブロックはスキップされます。
+```yaml
+# 算術
+{"add": [1, 2, 3]}  # 6
+{"mul": [{"var": "x"}, 2]}  # x * 2
 
-## トラブルシューティング
+# 比較
+{"gt": [{"var": "count"}, 10]}  # count > 10
+{"eq": ["{Status}", "ok"]}     # Status == "ok"
 
-- 401 Unauthorized: `OPENAI_API_KEY` またはサーバ/API キー設定を確認
-- レート制限／低速化: `--max-batch` を下げる、モデル側 `request_defaults.max_tokens` を下げる、`--target-latency-ms` を上げる
-- 出力が空:
-  - `regex`: パターンおよびキャプチャ群の指定を確認
-  - `tag`: LLM 出力が指定タグで囲まれているか確認
-- CSV の値は文字列: 必要に応じて `python` ブロックで数値変換等を行う
+# 論理
+{"and": [
+  {"gt": [{"var": "score"}, 80]},
+  {"lt": [{"var": "errors"}, 5]}
+]}
+
+# 文字列操作
+{"concat": ["Hello, ", {"var": "name"}]}
+{"replace": ["{text}", "old", "new"]}
+
+# コレクション
+{"map": {"list": [1,2,3], "fn": {"mul": [{"var": "item"}, 2]}}}
+{"filter": {"list": [1,2,3,4], "fn": {"gt": [{"var": "item"}, 2]}}}
+
+# 制御フロー
+{"if": {
+  "cond": {"gt": [{"var": "x"}, 0]},
+  "then": "positive",
+  "else": "non-positive"
+}}
+```
+
+### ブロックタイプ
+
+#### AIブロック
+```yaml
+- type: ai
+  exec: 1
+  model: gpt4
+  system_prompt: "あなたは親切なアシスタントです。"
+  prompts:
+    - "質問: {UserInput}"
+  mode: json  # v2: jsonモード
+  outputs:
+    - name: Answer
+      select: jsonpath  # v2: JSONPath
+      path: "$.response.text"
+      type_hint: string
+  save_to:  # v2: グローバル変数に保存
+    vars:
+      last_answer: Answer
+```
+
+#### Logicブロック
+```yaml
+# v2: set
+- type: logic
+  exec: 1
+  op: set
+  var: total
+  value: {"add": [{"var": "total"}, 10]}
+
+# v2: while
+- type: logic
+  exec: 2
+  op: while
+  init:
+    - op: set
+      var: i
+      value: 0
+  cond:
+    lt: [{"var": "i"}, 10]
+  step:
+    - op: set
+      var: i
+      value: {"add": [{"var": "i"}, 1]}
+    - op: emit
+      value: {"var": "i"}
+  outputs:
+    - name: Numbers
+      from: list
+
+# v1: for (引き続きサポート)
+- type: logic
+  exec: 3
+  op: for
+  list: "{Lines}"
+  parse: lines
+  var: line
+  map: "- {line}"
+  outputs:
+    - name: Formatted
+      from: join
+      join_with: "\n"
+```
+
+#### Pythonブロック
+```yaml
+# v2: インライン関数
+- type: python
+  exec: 1
+  entrypoint: process
+  function_code: |
+    def process(ctx, data: dict) -> dict:
+        # ctx.vars: グローバル変数
+        # ctx.get(path): ネストされた値を取得
+        # ctx.set(path, val): グローバル変数を設定
+        # ctx.log(level, msg): ロギング
+        
+        ctx.log("info", f"Processing {len(data)} items")
+        result = {"processed": len(data)}
+        return result
+  inputs:
+    data: "{InputData}"
+  outputs: [processed]
+
+# v1: 外部ファイル（引き続きサポート）
+- type: python
+  exec: 2
+  function: my_function
+  code_path: ./helper.py
+  inputs: [Input1, Input2]
+  outputs: [Output1]
+```
+
+#### Endブロック
+```yaml
+- type: end
+  exec: 100
+  final:
+    - name: answer
+      value: "{Result}"
+    - name: metadata
+      value: "{Meta}"
+  include_vars:  # v2: グローバル変数を含める
+    - counter
+    - timestamp
+```
+
+## 設定
+
+### ランタイム (v2)
+```yaml
+runtime:
+  python:
+    interpreter: "python>=3.11,<3.13"
+    venv: ".venv"
+    requirements:
+      - "numpy>=1.24"
+      - "pandas>=2.0"
+    allow_network: false
+```
+
+### バジェット (v2)
+```yaml
+budgets:
+  loops:
+    max_iters: 1000
+    on_exceed: "error"  # error | truncate | continue
+  recursion:
+    max_depth: 128
+    on_exceed: "error"
+  wall_time_ms: 300000
+  ai:
+    max_calls: 100
+    max_tokens: 500000
+```
+
+### グローバル変数 (v2)
+```yaml
+globals:
+  const:  # 読み取り専用
+    APP_VERSION: "1.0"
+    MAX_RETRIES: 3
+  vars:   # ミュータブル
+    counter: 0
+    state: "init"
+    results: []
+```
+
+## v1からv2への移行
+
+v1 YAMLファイルは変更なしで動作します。v2機能を活用するには:
+
+1. バージョンを更新:
+```yaml
+mabel:
+  version: "2.0"  # 以前は "1.0"
+```
+
+2. グローバル変数を追加（オプション）:
+```yaml
+globals:
+  vars:
+    my_var: 0
+```
+
+3. 条件でMEX式を使用:
+```yaml
+# v1 (JSON文字列、引き続き動作)
+run_if: "{\"equals\":[\"{ Status}\",\"ok\"]}"
+
+# v2 (ネイティブMEX、推奨)
+run_if:
+  eq: ["{Status}", "ok"]
+```
+
+4. シンプルな関数にはインラインPythonを使用:
+```yaml
+# v1 (外部ファイル)
+- type: python
+  function: helper
+  code_path: ./helper.py
+
+# v2 (インライン)
+- type: python
+  entrypoint: helper
+  function_code: |
+    def helper(ctx, x):
+        return {"result": x * 2}
+```
+
+## サンプル
+
+`examples/`ディレクトリを参照:
+- `sdg_demo.yaml` - v1.0互換サンプル
+- `sdg_demo_v2.yaml` - v2.0機能のショーケース
+- `helpers.py` - 外部Python関数のサンプル
 
 ## ライセンス
 
-MIT
+MITライセンス - LICENSEファイルを参照
+
+## コントリビューション
+
+コントリビューション歓迎！以下を確認してください:
+- v1互換性が維持されていること
+- v2機能がMABEL 2.0仕様に従っていること
+- v1とv2両方のサンプルでテストが通ること
