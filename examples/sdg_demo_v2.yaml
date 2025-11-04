@@ -1,0 +1,157 @@
+mabel:
+  version: "2.0"
+  id: "com.example.agent.demo_v2"
+  name: "MABEL v2 Demo"
+  description: "Demonstrates v2 features: globals, MEX, while, set, inline Python"
+
+# v2: グローバル変数/定数
+globals:
+  const:
+    APP_NAME: "SDG Nexus v2"
+    MAX_ITERATIONS: 3
+  vars:
+    counter: 0
+    memo: ""
+
+# v2: 予算設定
+budgets:
+  loops:
+    max_iters: 100
+    on_exceed: "error"
+  recursion:
+    max_depth: 64
+    on_exceed: "error"
+  wall_time_ms: 60000
+
+models:
+  - name: planner
+    api_model: phi4-mini
+    api_key: "sk-proxy-example-123"
+    base_url: http://127.0.0.1:11500/v1
+    request_defaults:
+      temperature: 0.2
+      max_tokens: 400
+
+blocks:
+  # v2: set演算子でカウンタ初期化
+  - type: logic
+    exec: 1
+    id: init_counter
+    name: "Initialize Counter"
+    op: set
+    var: counter
+    value: 0
+    outputs:
+      - name: InitialCounter
+        from: value
+
+  # AI分析（v1互換）
+  - type: ai
+    exec: 2
+    id: analyze
+    model: planner
+    system_prompt: |
+      You are a helpful assistant analyzing user input.
+      App: {APP_NAME}
+    prompts:
+      - |
+        Analyze the following input and provide 3 key points:
+        {UserInput}
+    outputs:
+      - name: Analysis
+        select: full
+    # v2: 変数保存
+    save_to:
+      vars:
+        memo: Analysis
+
+  # v2: while ループで反復処理
+  - type: logic
+    exec: 3
+    id: iterate
+    name: "Process with While"
+    op: while
+    # 初期化
+    init:
+      - op: set
+        var: i
+        value: 0
+    # 条件: i < MAX_ITERATIONS
+    cond:
+      lt:
+        - {"var": "i"}
+        - {"var": "MAX_ITERATIONS"}
+    # ステップ
+    step:
+      - op: set
+        var: i
+        value: {"add": [{"var": "i"}, 1]}
+      - op: emit
+        value: {"concat": ["Iteration ", {"to_string": {"var": "i"}}]}
+    budget:
+      loops:
+        max_iters: 10
+        on_exceed: "truncate"
+    outputs:
+      - name: Iterations
+        from: list
+      - name: IterCount
+        from: count
+
+  # v2: インラインPython関数
+  - type: python
+    exec: 4
+    id: format_v2
+    name: "Format with Inline Python"
+    entrypoint: format_result
+    function_code: |
+      def format_result(ctx, analysis: str, iterations: list) -> dict:
+          """v2形式: ctxを第一引数に取る"""
+          ctx.log("info", f"Formatting {len(iterations)} iterations")
+          
+          result = f"=== {ctx.vars.get('APP_NAME', 'Unknown')} ===\n"
+          result += f"Analysis:\n{analysis}\n\n"
+          result += f"Iterations ({len(iterations)}):\n"
+          for item in iterations:
+              result += f"  - {item}\n"
+          result += f"\nCounter: {ctx.vars.get('counter', 0)}"
+          
+          return {"FormattedResult": result}
+    inputs:
+      analysis: "{Analysis}"
+      iterations: "{Iterations}"
+    outputs: [FormattedResult]
+    use_env: "global"
+
+  # v2: MEX条件式の例
+  - type: logic
+    exec: 5
+    id: check_result
+    name: "Check with MEX"
+    op: if
+    cond:
+      and:
+        - {"gt": [{"var": "IterCount"}, 0]}
+        - {"ne": ["{Analysis}", ""]}
+    then: "Success"
+    else: "Failed"
+    outputs:
+      - name: Status
+        from: boolean
+      - name: Message
+        from: value
+
+  # 終了
+  - type: end
+    exec: 100
+    final:
+      - name: result
+        value: "{FormattedResult}"
+      - name: status
+        value: "{Message}"
+      - name: iterations
+        value: "{IterCount}"
+    # v2: グローバル変数を含める
+    include_vars:
+      - counter
+      - memo

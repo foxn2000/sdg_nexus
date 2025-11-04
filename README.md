@@ -1,312 +1,437 @@
-# SDG‑Nexus (Scalable Data Generator — Nexus)
+# SDG Nexus
 
-[日本語 README](README.JA.md)
+MABEL (Model And Blocks Expansion Language) based AI Agent System supporting **v2.0 specification**.
 
-SDG‑Nexus is a CLI tool and Python library for scalable, YAML‑driven data generation and transformation with Large Language Models (LLMs). It executes AI agent blueprints over JSONL/CSV datasets and talks to any OpenAI‑compatible endpoint (OpenAI, vLLM, SGLang, etc.) via the `/v1/chat/completions` API. An adaptive concurrency controller automatically tunes parallelism to balance throughput and stability.
+## Features
 
-Note: This implementation supports a subset of the YAML spec compatible with MABEL Studio v1.1 (models / blocks / connections, etc.). See the example and schema notes below.
+### MABEL v2.0 Support
+- **MEX Expression Language**: Turing-complete expression evaluation
+- **Global Variables**: Constants and mutable variables with `globals.const` and `globals.vars`
+- **Advanced Logic Operators**:
+  - `set`: Variable assignment with MEX expressions
+  - `while`: Conditional loops with budget controls
+  - `emit`: Value collection in loops
+  - Full MEX operators: arithmetic, comparison, string, collection, regex, etc.
+- **Inline Python Functions**: Define Python code directly in YAML with `function_code`
+- **Enhanced Python Integration**: Context object (`ctx`) with `vars`, `get`, `set`, `log`
+- **Budget Controls**: Loop/recursion limits with `budgets` configuration
+- **Enhanced AI Outputs**:
+  - JSONPath support (`select: jsonpath`)
+  - Type hints (`type_hint: number|boolean|json`)
+  - Variable saving (`save_to.vars`)
 
-## Highlights
+### MABEL v1.x Compatibility
+- Full backward compatibility maintained
+- Automatic version detection from `mabel.version`
+- v1.0 YAML files work without modification
 
-- YAML blueprint loading and validation (focused on `models` and `blocks`)
-- Block engine for `ai`, `logic`, `python`, and `end`
-- Works with OpenAI‑compatible Chat Completions (`/v1/chat/completions`)
-- Adaptive concurrency: adjusts batch size based on latency and error rate
-- Processes JSONL/CSV inputs record‑by‑record and saves final outputs as JSONL
-- Optional intermediate outputs for debugging (`--save-intermediate`)
+### Core Features
+- **Batch Processing**: Optimized concurrent AI API calls
+- **Adaptive Batching**: Dynamic batch size adjustment based on latency
+- **Multi-Model Support**: Define and use multiple LLM models
+- **Flexible I/O**: JSONL and CSV support
+- **Error Handling**: Configurable error handling (`fail`, `continue`, `retry`)
 
 ## Installation
 
-Requirements: Python >= 3.10
-
-Option A: Local editable install
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -U pip
-pip install -r requirements.txt
 pip install -e .
 ```
 
-Option B: Standard install (no local editing)
-```bash
-pip install -U pip
-pip install -r requirements.txt
-pip install .
-```
+## Quick Start
 
-The CLI entry point `sdg` will be installed via `pyproject.toml`.
+### v2.0 Example
 
-## Quickstart
-
-1) Set credentials
-
-- Using OpenAI:
-  - Export `OPENAI_API_KEY` in your shell.
-- Using an OpenAI‑compatible server (vLLM/SGLang/etc.):
-  - Set `models[].base_url` to your server URL.
-  - Provide an API key via `models[].api_key`. If you write `${ENV.SOMETHING}`, the current implementation ignores the variable name and reads `os.environ['OPENAI_API_KEY']`.
-
-2) Run the example
-```bash
-sdg run \
-  --yaml examples/sdg_demo.yaml \
-  --input examples/data/input.jsonl \
-  --output out/output.jsonl \
-  --max-batch 8 --min-batch 1
-```
-
-- The example reads JSONL records (each having `UserInput`), executes an `ai -> ai -> logic -> python -> end` pipeline, and writes the final JSONL to `out/output.jsonl`.
-
-3) CSV input (alternative)
-```bash
-sdg run \
-  --yaml examples/sdg_demo.yaml \
-  --input examples/data/input.csv \
-  --output out/out.jsonl
-```
-
-## CLI reference
-
-Subcommand style (preferred):
-```text
-sdg run --yaml PATH --input PATH --output PATH [options]
-```
-
-Options:
-- `--yaml` (required): YAML blueprint path
-- `--input` (required): Input dataset (.jsonl or .csv)
-- `--output` (required): Output JSONL file
-- `--max-batch` (int, default 8): Max concurrent requests
-- `--min-batch` (int, default 1): Min concurrent requests
-- `--target-latency-ms` (int, default 3000): Target average latency per request
-- `--save-intermediate` (flag): Save intermediate outputs for debugging
-
-Legacy mode is also supported for backward compatibility:
-```bash
-sdg --yaml ... --input ... --output ...
-```
-
-## Input and output formats
-
-- JSONL input: one JSON object per line. Each key becomes a variable available to templates in subsequent blocks.
-  - Example line: `{"UserInput": "What is the capital of Japan?"}`
-
-- CSV input: header row is used as field names; each row is converted to a dict with string values.
-
-- Output: by default, for each input record SDG‑Nexus writes a single JSON line composed of fields specified in the `end` block’s `final` list.
-
-- Intermediate outputs: when `--save-intermediate` is given, SDG‑Nexus also stores block‑level values in the per‑record result as keys named `_{exec}_{name}` (e.g., `_2_ShortAnswer`).
-
-## YAML blueprint (supported subset)
-
-Top level:
 ```yaml
-mabel: { version: "1.0" }     # optional
-models: [ ... ]               # required
-blocks:  [ ... ]              # required
-connections: [ ... ]          # parsed, reserved for future use
-```
+mabel:
+  version: "2.0"
 
-### models
+globals:
+  const:
+    APP_NAME: "My Agent"
+  vars:
+    counter: 0
 
-A model definition is referenced by name from `ai` blocks.
+budgets:
+  loops:
+    max_iters: 100
+    on_exceed: "error"
 
-Fields:
-- `name` (str): Identifier used by blocks.
-- `api_model` (str): The model name for the backend (e.g., `gpt-4o-mini`, `phi4-mini`, etc.).
-- `api_key` (str): API key literal or `${ENV.SOMETHING}`. Note: current implementation ignores the variable name and reads `OPENAI_API_KEY` from environment when this form is used.
-- `base_url` (str, optional): Base URL; `/v1` is appended automatically if missing (e.g., `http://127.0.0.1:8000` becomes `http://127.0.0.1:8000/v1`).
-- `organization` (str, optional): OpenAI organization ID (if applicable).
-- `headers` (map, optional): Extra vendor‑specific headers (the SDK manages standard headers).
-- `request_defaults` (map, optional): Default request parameters merged into each `ai` call.
-  - Common keys: `temperature`, `top_p`, `max_tokens`, `timeout_sec`, `retry`
-  - `retry` structure:
-    ```yaml
-    retry:
-      max_attempts: 3
-      backoff:
-        initial_ms: 250
-        factor: 2.0
-    ```
-
-Example:
-```yaml
 models:
-  - name: writer
+  - name: gpt4
     api_model: gpt-4o-mini
-    api_key: "${ENV.OPENAI_API_KEY}"
-    base_url: https://api.openai.com
-    headers:
-      HTTP-Referer: "https://your-app.example"
+    api_key: ${ENV.OPENAI_API_KEY}
+    request_defaults:
+      temperature: 0.0
+      max_tokens: 500
+
+blocks:
+  # Set variable with MEX expression
+  - type: logic
+    exec: 1
+    op: set
+    var: counter
+    value: {"add": [{"var": "counter"}, 1]}
+  
+  # While loop
+  - type: logic
+    exec: 2
+    op: while
+    init:
+      - op: set
+        var: i
+        value: 0
+    cond:
+      lt:
+        - {"var": "i"}
+        - 5
+    step:
+      - op: set
+        var: i
+        value: {"add": [{"var": "i"}, 1]}
+      - op: emit
+        value: {"var": "i"}
+    outputs:
+      - name: Numbers
+        from: list
+  
+  # Inline Python
+  - type: python
+    exec: 3
+    entrypoint: process
+    function_code: |
+      def process(ctx, numbers: list) -> dict:
+          ctx.log("info", f"Processing {len(numbers)} numbers")
+          total = sum(numbers)
+          return {"Sum": total}
+    inputs:
+      numbers: "{Numbers}"
+    outputs: [Sum]
+  
+  - type: end
+    exec: 100
+    final:
+      - name: result
+        value: "{Sum}"
+    include_vars:
+      - counter
+```
+
+### v1.0 Example (Still Supported)
+
+```yaml
+mabel:
+  version: "1.0"
+
+models:
+  - name: planner
+    api_model: gpt-4o-mini
+    api_key: ${ENV.OPENAI_API_KEY}
     request_defaults:
       temperature: 0.2
-      top_p: 0.95
-      max_tokens: 400
-      timeout_sec: 60
-      retry:
-        max_attempts: 3
-        backoff: { initial_ms: 250, factor: 2.0 }
+
+blocks:
+  - type: ai
+    exec: 1
+    model: planner
+    prompts:
+      - "Summarize: {UserInput}"
+    outputs:
+      - name: Summary
+        select: full
+  
+  - type: end
+    exec: 2
+    final:
+      - name: answer
+        value: "{Summary}"
 ```
 
-Parameter precedence: `request_defaults` (model) are merged with `params` (block); block `params` take priority.
+## Usage
 
-### blocks
+### Command Line
 
-Blocks are executed in ascending order of `exec`. Each block supports:
-- `exec` (int): Execution order
-- `run_if` (object or JSON string, optional): Conditional; if false, the block is skipped for that record
-- `on_error` (`fail` | `continue`, default `fail`): Whether to continue pipeline when the block fails
+```bash
+# Process JSONL input
+sdg run \
+  --yaml examples/sdg_demo_v2.yaml \
+  --input examples/data/input.jsonl \
+  --output output/result.jsonl
 
-Supported block types:
-
-#### ai
-
-Fields:
-- `type: ai`
-- `model` (str): Name of a model in `models`
-- `system_prompt` (str, optional): Rendered with the record context
-- `prompts` (list[str]): Rendered and joined into a user message
-- `outputs` (list[OutputDef], optional): How to extract fields from the LLM response
-  - `name` (str): Output variable name
-  - `select` (`full` | `tag` | `regex`): Extraction mode
-  - `tag` (str, required for `tag`): Capture content inside `<tag> ... </tag>` (case‑insensitive, multiline)
-  - `regex` (str, required for `regex`): Python regex; if it has a capture group `( ... )`, that group is returned; otherwise the full match
-  - `join_with` (str, optional): If multiple values are extracted, join them into one string
-- `params` (map, optional): Overrides for per‑request parameters (e.g., `temperature`, `max_tokens`, `timeout_sec`, `retry`)
-
-Default output when `outputs` is omitted:
-```yaml
-outputs:
-  - name: full
-    select: full
+# With custom batch settings
+sdg run \
+  --yaml examples/sdg_demo_v2.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --max-batch 16 \
+  --min-batch 2 \
+  --target-latency 2000
 ```
 
-#### logic
-
-Fields:
-- `type: logic`
-- `name` (str, optional)
-- `op` (`if` | `and` | `or` | `not` | `for`)
-- `cond` (object): For `if`, a JSON object supporting:
-  - `equals`, `not_equals`, `contains`, `is_empty`
-  - `gt`, `lt`, `gte`, `lte`
-  - logical composition: `and`, `or`, `not`
-  - All operands are rendered as templates before comparison.
-- `then`, `else` (str, optional): Text outputs for `if`
-- `operands` (list): For `and`/`or`/`not`, list of conditions
-- For loops (`op: for`):
-  - `list` (str): Name of the list (or comma‑separated string) in the context
-  - `parse` (str, optional: `"regex"` for regex parse; defaults to split by comma)
-  - `regex_pattern` (str, when `parse: regex`)
-  - `var` (str, optional): Loop variable name, default `"item"`
-  - `drop_empty` (bool, optional): Filter empty items
-  - `where` (object): Condition applied per item (same operators as `cond`)
-  - `map` (str): Template applied to each item (e.g., `"* {item}"`)
-- `outputs` (list of maps): How to expose results to the context, per op:
-  - For `if`:  
-    - `name`: output key  
-    - `from`: `boolean` | `text` | `source`  
-      - `boolean` → the evaluated truth value  
-      - `text` → `then`/`else` output  
-      - `source` → copy a named field from the context (`source: FieldName`)
-  - For `and`/`or`/`not`:  
-    - `name`: output key, value is the boolean result
-  - For `for`:  
-    - `name`: output key  
-    - `join_with` (str, optional): Join list into a string  
-    - `limit` (int, optional), `offset` (int, optional)
-
-#### python
-
-Fields:
-- `type: python`
-- `name` (str, optional)
-- `function` (str, required): Name of a function inside `code_path`
-- `inputs` (list[str]): Names of fields from context to pass as positional args
-- `code_path` (str): Python file path to load dynamically
-- `venv_path` (ignored): Use the active Python environment instead
-- `outputs` (list[str]): Names to map returned values into the context  
-  - Function return shape:
-    - dict → pick keys specified in `outputs`
-    - non‑dict → mapped positionally to names in `outputs` (single value or list/tuple)
-
-#### end
-
-Fields:
-- `type: end`
-- `final` (list of `{ name, value }`): Templates evaluated and written to the final JSONL
-- `exit_code` (str, optional)
-- `reason` (str, optional)
-
-### Templates and extraction helpers
-
-- Templates: any string may reference `{VarName}` or dotted keys like `{foo.bar}`; missing keys resolve to empty strings.
-- Tag extraction: `<tag> ... </tag>` (case‑insensitive, multiline).
-- Regex extraction: if a capturing group exists, group(1) is returned; otherwise the full match.
-
-## Adaptive concurrency (batch optimizer)
-
-At each `ai` round that runs across multiple records, SDG‑Nexus measures the average latency and error count, then adjusts the concurrency:
-- If errors occur or the average latency exceeds `--target-latency-ms`, it reduces concurrency down to `--min-batch`.
-- If requests are stable and fast, it increases concurrency up to `--max-batch`.
-
-This increases throughput while being resilient to rate limits and server slowdowns.
-
-## Backends (OpenAI‑compatible)
-
-- Uses the OpenAI Python SDK (>= 1.40) with a custom `base_url`.
-- If your `base_url` does not end with `/v1`, SDG‑Nexus appends `/v1` automatically.
-- Extra vendor headers can be set via `models[].headers`.
-
-Examples:
-- OpenAI: `base_url: https://api.openai.com`
-- vLLM proxy: `base_url: http://127.0.0.1:8000`
-- SGLang: `base_url: http://127.0.0.1:30000`
-
-Note: This project optimizes concurrency with standard HTTP chat calls; it does not use the OpenAI Batches API.
-
-## Programmatic usage (Python)
+### Python API
 
 ```python
-from sdg.runner import run
+from sdg.config import load_config
+from sdg.executors import run_pipeline
+import asyncio
 
-run(
-    yaml_path="examples/sdg_demo.yaml",
-    input_path="examples/data/input.jsonl",
-    output_path="out/output.jsonl",
-    max_batch=8,
-    min_batch=1,
-    target_latency_ms=3000,
-    save_intermediate=False,
-)
+# Load configuration
+cfg = load_config("pipeline.yaml")
+
+# Prepare dataset
+dataset = [
+    {"UserInput": "What is AI?"},
+    {"UserInput": "Explain machine learning"}
+]
+
+# Run pipeline
+results = asyncio.run(run_pipeline(cfg, dataset))
+
+for result in results:
+    print(result)
 ```
 
-## Example blueprint
+## MABEL v2 Architecture
 
-See `examples/sdg_demo.yaml` for a complete, runnable pipeline demonstrating:
-- Two `ai` blocks (`planner` then `writer`)
-- A `logic` guard checking the presence of a short answer
-- A `python` block (`examples/helpers.py`) to post‑process the answer
-- An `end` block that selects the final fields
+### MEX Expression Language
 
-## Error handling
+MEX provides a safe, Turing-complete expression language:
 
-- Block-level errors:
-  - Default behavior is `on_error: fail`, which stops the pipeline and raises the exception.
-  - If you set `on_error: continue`, the pipeline proceeds and the record context receives an error string under the key `error_block_{exec}` (e.g., `error_block_2`).
-- Conditional execution:
-  - If a block's `run_if` evaluates to false for a given record, that block is skipped for that record.
+```yaml
+# Arithmetic
+{"add": [1, 2, 3]}  # 6
+{"mul": [{"var": "x"}, 2]}  # x * 2
 
-## Troubleshooting
+# Comparison
+{"gt": [{"var": "count"}, 10]}  # count > 10
+{"eq": ["{Status}", "ok"]}     # Status == "ok"
 
-- 401 Unauthorized: Check `OPENAI_API_KEY` or your server/API key configuration.
-- Rate limits / slowdowns: lower `--max-batch` or the model `request_defaults.max_tokens`, raise `--target-latency-ms`.
-- Empty outputs:
-  - For `regex`, ensure the pattern and capture groups are correct.
-  - For `tag`, confirm your LLM output actually wraps content in the chosen tag.
-- CSV inputs are strings; cast to numbers in `python` blocks if needed.
+# Logic
+{"and": [
+  {"gt": [{"var": "score"}, 80]},
+  {"lt": [{"var": "errors"}, 5]}
+]}
+
+# String operations
+{"concat": ["Hello, ", {"var": "name"}]}
+{"replace": ["{text}", "old", "new"]}
+
+# Collections
+{"map": {"list": [1,2,3], "fn": {"mul": [{"var": "item"}, 2]}}}
+{"filter": {"list": [1,2,3,4], "fn": {"gt": [{"var": "item"}, 2]}}}
+
+# Control flow
+{"if": {
+  "cond": {"gt": [{"var": "x"}, 0]},
+  "then": "positive",
+  "else": "non-positive"
+}}
+```
+
+### Block Types
+
+#### AI Block
+```yaml
+- type: ai
+  exec: 1
+  model: gpt4
+  system_prompt: "You are a helpful assistant."
+  prompts:
+    - "Question: {UserInput}"
+  mode: json  # v2: json mode
+  outputs:
+    - name: Answer
+      select: jsonpath  # v2: JSONPath
+      path: "$.response.text"
+      type_hint: string
+  save_to:  # v2: save to global vars
+    vars:
+      last_answer: Answer
+```
+
+#### Logic Block
+```yaml
+# v2: set
+- type: logic
+  exec: 1
+  op: set
+  var: total
+  value: {"add": [{"var": "total"}, 10]}
+
+# v2: while
+- type: logic
+  exec: 2
+  op: while
+  init:
+    - op: set
+      var: i
+      value: 0
+  cond:
+    lt: [{"var": "i"}, 10]
+  step:
+    - op: set
+      var: i
+      value: {"add": [{"var": "i"}, 1]}
+    - op: emit
+      value: {"var": "i"}
+  outputs:
+    - name: Numbers
+      from: list
+
+# v1: for (still supported)
+- type: logic
+  exec: 3
+  op: for
+  list: "{Lines}"
+  parse: lines
+  var: line
+  map: "- {line}"
+  outputs:
+    - name: Formatted
+      from: join
+      join_with: "\n"
+```
+
+#### Python Block
+```yaml
+# v2: inline function
+- type: python
+  exec: 1
+  entrypoint: process
+  function_code: |
+    def process(ctx, data: dict) -> dict:
+        # ctx.vars: global variables
+        # ctx.get(path): get nested value
+        # ctx.set(path, val): set global variable
+        # ctx.log(level, msg): logging
+        
+        ctx.log("info", f"Processing {len(data)} items")
+        result = {"processed": len(data)}
+        return result
+  inputs:
+    data: "{InputData}"
+  outputs: [processed]
+
+# v1: external file (still supported)
+- type: python
+  exec: 2
+  function: my_function
+  code_path: ./helper.py
+  inputs: [Input1, Input2]
+  outputs: [Output1]
+```
+
+#### End Block
+```yaml
+- type: end
+  exec: 100
+  final:
+    - name: answer
+      value: "{Result}"
+    - name: metadata
+      value: "{Meta}"
+  include_vars:  # v2: include global vars
+    - counter
+    - timestamp
+```
+
+## Configuration
+
+### Runtime (v2)
+```yaml
+runtime:
+  python:
+    interpreter: "python>=3.11,<3.13"
+    venv: ".venv"
+    requirements:
+      - "numpy>=1.24"
+      - "pandas>=2.0"
+    allow_network: false
+```
+
+### Budgets (v2)
+```yaml
+budgets:
+  loops:
+    max_iters: 1000
+    on_exceed: "error"  # error | truncate | continue
+  recursion:
+    max_depth: 128
+    on_exceed: "error"
+  wall_time_ms: 300000
+  ai:
+    max_calls: 100
+    max_tokens: 500000
+```
+
+### Global Variables (v2)
+```yaml
+globals:
+  const:  # Read-only
+    APP_VERSION: "1.0"
+    MAX_RETRIES: 3
+  vars:   # Mutable
+    counter: 0
+    state: "init"
+    results: []
+```
+
+## Migration from v1 to v2
+
+v1 YAML files work without changes. To leverage v2 features:
+
+1. Update version:
+```yaml
+mabel:
+  version: "2.0"  # was "1.0"
+```
+
+2. Add global variables (optional):
+```yaml
+globals:
+  vars:
+    my_var: 0
+```
+
+3. Use MEX expressions in conditions:
+```yaml
+# v1 (JSON string, still works)
+run_if: "{\"equals\":[\"{ Status}\",\"ok\"]}"
+
+# v2 (native MEX, recommended)
+run_if:
+  eq: ["{Status}", "ok"]
+```
+
+4. Use inline Python for simple functions:
+```yaml
+# v1 (external file)
+- type: python
+  function: helper
+  code_path: ./helper.py
+
+# v2 (inline)
+- type: python
+  entrypoint: helper
+  function_code: |
+    def helper(ctx, x):
+        return {"result": x * 2}
+```
+
+## Examples
+
+See `examples/` directory:
+- `sdg_demo.yaml` - v1.0 compatible example
+- `sdg_demo_v2.yaml` - v2.0 feature showcase
+- `helpers.py` - External Python functions example
 
 ## License
 
-MIT
+MIT License - see LICENSE file
+
+## Contributing
+
+Contributions welcome! Please ensure:
+- v1 compatibility is maintained
+- v2 features follow MABEL 2.0 specification
+- Tests pass for both v1 and v2 examples
