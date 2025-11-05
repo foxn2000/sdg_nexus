@@ -929,8 +929,267 @@ blocks:
 
 ---
 
-## 16. まとめ
+## 16. 実装状況（Implementation Status）
+
+本節では、MABEL v2仕様の実際の実装状況を明記する。
+
+### 16.1 完全実装済み機能（✅ Fully Implemented）
+
+以下の機能は現在のPython実装で完全にサポートされており、本番環境で使用可能である。
+
+#### トップレベル構造
+- ✅ `mabel` メタ情報（version, dialect, id, name, description）
+- ✅ `runtime.python` 統合仮想環境設定
+  - `interpreter`, `venv`, `requirements_file`, `requirements`
+  - `allow_network`, `env`, `setup`
+- ✅ `budgets` グローバル予算設定
+  - `loops`, `recursion`, `wall_time_ms`, `ai`
+- ✅ `models` AIモデル定義（全フィールド対応）
+- ✅ `globals.const` / `globals.vars` グローバル変数/定数
+- ✅ `templates` 文字列テンプレート
+- ✅ `files` 組み込みファイル
+- ✅ `connections` 明示配線
+
+#### AIブロック（type: ai）
+- ✅ 基本フィールド（model, system_prompt, prompts, params）
+- ✅ `attachments` 添付ファイル
+- ✅ `mode: "json"` JSONモード
+- ✅ `outputs` 出力定義
+  - `select: full` 全文抽出
+  - `select: tag` タグ抽出
+  - `select: regex` 正規表現抽出
+  - `select: jsonpath` JSONPath抽出（簡易実装）
+  - `type_hint` 型変換（string, number, boolean, json）
+- ✅ `save_to.vars` 変数保存
+- ✅ `on_error`, `retry` エラー処理・再試行
+
+#### Logicブロック（type: logic）
+
+**v1互換演算子：**
+- ✅ `op: if` 条件分岐
+- ✅ `op: and` / `op: or` / `op: not` 論理演算
+- ✅ `op: for` 反復処理
+  - `list`, `parse` (lines/csv/json/regex), `regex_pattern`
+  - `var`, `drop_empty`, `where`, `map`
+  - `outputs[].from` (join/count/any/all/first/last/list)
+
+**v2新規演算子：**
+- ✅ `op: set` グローバル変数代入
+  - `var` 変数名指定
+  - `value` MEX式による値計算
+  - `outputs[].from: var` 変数値を出力
+- ✅ `op: while` 条件付き反復
+  - `init` 初期化ステップ
+  - `cond` MEX条件式
+  - `step` 反復ステップ（`set`, `emit`をサポート）
+  - `budget.loops` ループ予算制御
+  - `outputs[].from: list/count/var` 結果出力
+
+**MEX（MABEL Expression）エンジン：**
+- ✅ 論理演算: `and`, `or`, `not`
+- ✅ 比較演算: `eq`, `ne`, `lt`, `le`, `gt`, `ge`
+- ✅ 算術演算: `add`, `sub`, `mul`, `div`, `mod`, `pow`, `neg`
+- ✅ 文字列操作: `concat`, `split`, `replace`, `lower`, `upper`, `trim`, `len`
+- ✅ コレクション操作: `unique`, `sort`, `any`, `all`
+- ✅ 正規表現: `regex_match`, `regex_extract`, `regex_replace`
+- ✅ 制御構造: `if` (cond/then/else), `case` (when配列/default)
+- ✅ 変数参照: `var` グローバル変数, `ref` 出力名参照
+- ✅ パス参照: `get` (obj/path/default)
+- ✅ 時間・乱数: `now`, `rand` (min/max)
+- ✅ 型変換: `to_number`, `to_string`, `to_boolean`, `parse_json`, `stringify`
+
+#### Pythonブロック（type: python）
+- ✅ `function` / `entrypoint` 関数名指定
+- ✅ `inputs` 引数指定
+  - v1形式: 配列 `[arg1, arg2]`
+  - v2形式: 辞書 `{name: value}`
+- ✅ `code_path` 外部ファイル読み込み
+- ✅ `function_code` インラインコード（v2）
+- ✅ `outputs` 出力名配列
+- ✅ `use_env: "global"` / `"override"` 環境選択
+- ✅ `override_env` 個別環境設定
+- ✅ `timeout_ms` タイムアウト
+- ✅ `ctx_access` 権限宣言
+- ✅ `on_error`, `retry` エラー処理
+
+**Python Context API（v2）：**
+```python
+ctx.vars          # グローバル変数辞書（読み書き）
+ctx.get(path)     # パス参照で値取得
+ctx.set(path, value)  # パス参照で値設定
+ctx.emit(name, value) # 値の収集（プレースホルダー実装）
+ctx.log(level, message)  # ログ出力
+```
+
+#### Endブロック（type: end）
+- ✅ `reason`, `exit_code` 終了理由・コード
+- ✅ `final` 最終出力配列
+- ✅ `final_mode: "map"` / `"list"` 出力形式
+- ✅ `include_vars` グローバル変数包含
+
+### 16.2 部分実装・制限あり機能（⚠️ Partially Implemented）
+
+以下の機能は基本的な実装は存在するが、制限や未対応の部分がある。
+
+#### MEXコレクション操作の制限
+- ⚠️ `map`, `filter` オペレータは定義されているが、ネストしたコンテキスト評価が未完全
+- ⚠️ `reduce`, `slice` は定義のみで実行フローでの使用例が不足
+
+### 16.3 未実装機能（❌ Not Implemented）
+
+以下の機能はドキュメントに記載されているが、現在のPython実装では**動作しない**。これらを使用すると実行時エラーが発生する。
+
+#### Logicブロック未実装演算子
+- ❌ **`op: recurse`** 再帰関数定義
+  - `name`, `function.args/returns/base_case/body`
+  - `with`, `budget.recursion`
+  - 実装コード: executors.pyに未実装
+  
+- ❌ **`op: reduce`** リスト畳み込み演算
+  - `list`, `initial`, `var`, `accumulator`, `body`
+  - 実装コード: executors.pyに未実装
+
+- ❌ **`op: call`** ユーザ定義ロジック関数呼び出し
+  - `function`, `with`, `returns`
+  - 実装コード: executors.pyに未実装
+
+- ❌ **`op: let`** ローカル変数束縛
+  - `bindings`, `body`
+  - 実装コード: executors.pyに未実装
+
+#### 関数定義システムの未実装
+- ❌ **`functions.logic`** ロジック関数定義
+  - config.pyには定義クラスが存在
+  - executors.pyでの実行ロジックが未実装
+  
+- ❌ **`functions.python`** Python関数定義（グローバル）
+  - config.pyには定義クラスが存在
+  - executors.pyでの使用例が未実装
+
+#### MEX演算子の未実装部分
+- ❌ **`set`演算子（MEX内）** - MEX式内での代入
+  - mex.pyには`_eval_op`内で`set`が実装されているが、logicブロックの`op: set`とは異なる
+  - 複雑な式内での変数更新は未検証
+
+### 16.4 実装推奨事項（Implementation Recommendations）
+
+YAMLファイルを記述する際は、以下のガイドラインに従うこと：
+
+#### 使用すべき機能（推奨）
+```yaml
+# ✅ 推奨: v1互換の基本機能
+- type: logic
+  op: if / and / or / not / for
+  
+# ✅ 推奨: v2の実装済み機能
+- type: logic
+  op: set / while
+  
+# ✅ 推奨: インラインPython
+- type: python
+  function_code: |
+    def main(ctx, **inputs):
+        return {...}
+```
+
+#### 避けるべき機能（未実装）
+```yaml
+# ❌ エラー: 未実装の演算子
+- type: logic
+  op: recurse  # 実行時エラー
+  
+- type: logic
+  op: reduce   # 実行時エラー
+  
+- type: logic
+  op: call     # 実行時エラー
+  
+- type: logic
+  op: let      # 実行時エラー
+
+# ❌ エラー: 未実装の関数システム
+functions:
+  logic:       # 定義できるが実行されない
+    - name: "my_func"
+      ...
+```
+
+#### 回避策（Workarounds）
+
+**再帰処理が必要な場合：**
+```yaml
+# recurse の代わりに Python を使用
+- type: python
+  function_code: |
+    def fib(n):
+        if n <= 1: return n
+        return fib(n-1) + fib(n-2)
+    
+    def main(ctx, n: int) -> dict:
+        return {"Result": fib(n)}
+```
+
+**リスト畳み込みが必要な場合：**
+```yaml
+# reduce の代わりに Python を使用
+- type: python
+  function_code: |
+    from functools import reduce
+    def main(ctx, items: list) -> dict:
+        result = reduce(lambda a, b: a + b, items, 0)
+        return {"Sum": result}
+```
+
+**共通ロジックの再利用が必要な場合：**
+```yaml
+# functions.logic の代わりに外部Pythonファイルを使用
+- type: python
+  code_path: "./my_functions.py"
+  function: "shared_logic"
+```
+
+### 16.5 バージョン別互換性マトリクス
+
+| 機能 | v1.0 | v2.0 仕様 | v2.0 実装 |
+|------|------|----------|----------|
+| ai ブロック基本 | ✅ | ✅ | ✅ |
+| ai JSONモード | ❌ | ✅ | ✅ |
+| ai JSONPath | ❌ | ✅ | ✅ |
+| logic if/and/or/not | ✅ | ✅ | ✅ |
+| logic for | ✅ | ✅ | ✅ |
+| logic set | ❌ | ✅ | ✅ |
+| logic while | ❌ | ✅ | ✅ |
+| logic recurse | ❌ | ✅ | ❌ |
+| logic reduce | ❌ | ✅ | ❌ |
+| logic call | ❌ | ✅ | ❌ |
+| logic let | ❌ | ✅ | ❌ |
+| MEX基本演算 | ❌ | ✅ | ✅ |
+| Python 外部ファイル | ✅ | ✅ | ✅ |
+| Python インライン | ❌ | ✅ | ✅ |
+| Python ctx API | ❌ | ✅ | ✅ |
+| runtime統合環境 | ❌ | ✅ | ✅ |
+| budgets予算制御 | ❌ | ✅ | ✅ |
+| globals変数管理 | ❌ | ✅ | ✅ |
+| functions定義 | ❌ | ✅ | ❌ |
+| templates | ❌ | ✅ | ✅ |
+| files | ❌ | ✅ | ✅ |
+
+### 16.6 実装ロードマップ（参考）
+
+将来的な実装予定（優先度順）：
+
+1. **高優先度**: `op: recurse` 再帰関数（Turing完全性のため重要）
+2. **高優先度**: `op: call` / `functions.logic` 関数システム（コード再利用）
+3. **中優先度**: `op: reduce` リスト畳み込み（関数型プログラミング）
+4. **中優先度**: `op: let` ローカル束縛（スコープ制御）
+5. **低優先度**: MEX高度な機能（最適化・拡張）
+
+---
+
+## 17. まとめ
 - **統合仮想環境**（`runtime.python`）で再現性を確保。
-- **インライン Python** と `functions.python` で迅速な拡張。
-- **`while`/`recurse`/`set`/`let`/`reduce`/`call`/`emit`** を備え**Turing 完全**なロジックを安全な予算付きで実現。
-- v1 機能は本仕様に**完全内包**され、単独で利用可能。
+- **インライン Python** で迅速な拡張が可能（完全実装済み）。
+- **`set`/`while`** を使用した基本的な反復処理が可能（完全実装済み）。
+- **`recurse`/`reduce`/`call`/`let`** は仕様のみで未実装のため使用不可。
+- v1 機能は本仕様に**完全内包**され、v2実装でもすべて動作する。
+- **実装状況を確認**してからYAMLを記述することを強く推奨。

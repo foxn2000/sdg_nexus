@@ -173,10 +173,10 @@ class MEXEvaluator:
         # 変数参照
         if op == "var":
             name = str(args)
-            # グローバル変数を優先、次にコンテキスト
-            if name in self.globals_vars:
-                return self.globals_vars[name]
-            return self.context.get(name)
+            # ローカル変数（コンテキスト）を優先、次にグローバル変数
+            if name in self.context:
+                return self.context.get(name)
+            return self.globals_vars.get(name)
         if op == "ref":
             # 出力名参照（コンテキストのみ）
             return self.context.get(str(args))
