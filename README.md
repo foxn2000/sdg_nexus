@@ -5,20 +5,26 @@ MABEL (Model And Blocks Expansion Language) based AI Agent System supporting **v
 ## Features
 
 ### MABEL v2.0 Support
-- **MEX Expression Language**: Turing-complete expression evaluation
+- **MEX Expression Language**: Turing-complete expression evaluation engine
 - **Global Variables**: Constants and mutable variables with `globals.const` and `globals.vars`
 - **Advanced Logic Operators**:
   - `set`: Variable assignment with MEX expressions
+  - `let`: Local variable bindings with scoped execution
   - `while`: Conditional loops with budget controls
   - `emit`: Value collection in loops
-  - Full MEX operators: arithmetic, comparison, string, collection, regex, etc.
+  - `reduce`: List fold operations with accumulator
+  - `call`: User-defined logic function calls
+  - `recurse`: Recursive function execution with base case
+  - Full MEX operators: arithmetic, comparison, string, collection, regex, logic
 - **Inline Python Functions**: Define Python code directly in YAML with `function_code`
-- **Enhanced Python Integration**: Context object (`ctx`) with `vars`, `get`, `set`, `log`
-- **Budget Controls**: Loop/recursion limits with `budgets` configuration
+- **Enhanced Python Integration**: Context object (`ctx`) with `vars`, `get`, `set`, `log`, `emit`
+- **Budget Controls**: Loop/recursion/AI call limits with `budgets` configuration
 - **Enhanced AI Outputs**:
   - JSONPath support (`select: jsonpath`)
-  - Type hints (`type_hint: number|boolean|json`)
+  - Type hints (`type_hint: number|boolean|json|string`)
   - Variable saving (`save_to.vars`)
+  - JSON mode (`mode: json`)
+- **User-Defined Functions**: Define reusable logic and Python functions
 
 ### MABEL v1.x Compatibility
 - Full backward compatibility maintained
@@ -37,6 +43,13 @@ MABEL (Model And Blocks Expansion Language) based AI Agent System supporting **v
 ```bash
 pip install -e .
 ```
+
+## Requirements
+
+- Python >= 3.10
+- PyYAML >= 6.0.1
+- openai >= 1.40.0
+- tqdm >= 4.66.0
 
 ## Quick Start
 
@@ -73,7 +86,7 @@ blocks:
     var: counter
     value: {"add": [{"var": "counter"}, 1]}
   
-  # While loop
+  # While loop with emit
   - type: logic
     exec: 2
     op: while
@@ -103,6 +116,7 @@ blocks:
       def process(ctx, numbers: list) -> dict:
           ctx.log("info", f"Processing {len(numbers)} numbers")
           total = sum(numbers)
+          ctx.set("total_sum", total)
           return {"Sum": total}
     inputs:
       numbers: "{Numbers}"
@@ -115,6 +129,7 @@ blocks:
         value: "{Sum}"
     include_vars:
       - counter
+      - total_sum
 ```
 
 ### v1.0 Example (Still Supported)
@@ -201,24 +216,47 @@ MEX provides a safe, Turing-complete expression language:
 # Arithmetic
 {"add": [1, 2, 3]}  # 6
 {"mul": [{"var": "x"}, 2]}  # x * 2
+{"sub": [10, 3]}  # 7
+{"div": [10, 2]}  # 5
+{"mod": [10, 3]}  # 1
 
 # Comparison
 {"gt": [{"var": "count"}, 10]}  # count > 10
-{"eq": ["{Status}", "ok"]}     # Status == "ok"
+{"lt": [{"var": "score"}, 50]}  # score < 50
+{"gte": [{"var": "x"}, 0]}  # x >= 0
+{"lte": [{"var": "y"}, 100]}  # y <= 100
+{"eq": ["{Status}", "ok"]}  # Status == "ok"
+{"ne": ["{Status}", "error"]}  # Status != "error"
 
 # Logic
 {"and": [
   {"gt": [{"var": "score"}, 80]},
   {"lt": [{"var": "errors"}, 5]}
 ]}
+{"or": [
+  {"eq": ["{Status}", "ok"]},
+  {"eq": ["{Status}", "pending"]}
+]}
+{"not": {"eq": ["{Status}", "failed"]}}
 
 # String operations
 {"concat": ["Hello, ", {"var": "name"}]}
 {"replace": ["{text}", "old", "new"]}
+{"length": ["{message}"]}
+{"upper": ["{text}"]}
+{"lower": ["{TEXT}"]}
+{"trim": ["  spaced  "]}
+{"split": ["{csv}", ","]}
+{"join": [["a", "b", "c"], "_"]}
 
 # Collections
 {"map": {"list": [1,2,3], "fn": {"mul": [{"var": "item"}, 2]}}}
 {"filter": {"list": [1,2,3,4], "fn": {"gt": [{"var": "item"}, 2]}}}
+{"reduce": {"list": [1,2,3], "fn": {"add": [{"var": "acc"}, {"var": "item"}]}, "init": 0}}
+{"get": {"dict": {"a": 1, "b": 2}, "key": "a"}}
+{"keys": [{"a": 1, "b": 2}]}
+{"values": [{"a": 1, "b": 2}]}
+{"length": [[1, 2, 3]]}
 
 # Control flow
 {"if": {
@@ -238,27 +276,52 @@ MEX provides a safe, Turing-complete expression language:
   system_prompt: "You are a helpful assistant."
   prompts:
     - "Question: {UserInput}"
-  mode: json  # v2: json mode
+  mode: json  # v2: json mode for structured output
   outputs:
     - name: Answer
-      select: jsonpath  # v2: JSONPath
+      select: jsonpath  # v2: JSONPath extraction
       path: "$.response.text"
-      type_hint: string
-  save_to:  # v2: save to global vars
+      type_hint: string  # v2: Type conversion
+  save_to:  # v2: Save to global variables
     vars:
       last_answer: Answer
+  on_error: continue  # v2: Error handling
+  retry:  # v2: Retry configuration
+    max_attempts: 3
+    backoff_ms: 1000
 ```
 
 #### Logic Block
+
+##### set - Variable Assignment
 ```yaml
-# v2: set
 - type: logic
   exec: 1
   op: set
   var: total
   value: {"add": [{"var": "total"}, 10]}
+```
 
-# v2: while
+##### let - Local Bindings
+```yaml
+- type: logic
+  exec: 1
+  op: let
+  bindings:
+    x: 10
+    y: {"mul": [{"var": "x"}, 2]}
+  body:
+    - op: set
+      var: result
+      value: {"add": [{"var": "x"}, {"var": "y"}]}
+  outputs:
+    - name: Result
+      from: var
+      var: result
+```
+
+##### while - Conditional Loop
+```yaml
 - type: logic
   exec: 2
   op: while
@@ -277,8 +340,87 @@ MEX provides a safe, Turing-complete expression language:
   outputs:
     - name: Numbers
       from: list
+```
 
-# v1: for (still supported)
+##### reduce - List Fold
+```yaml
+- type: logic
+  exec: 1
+  op: reduce
+  list: "{Items}"
+  var: item
+  value: 0  # Initial accumulator value
+  body:
+    - op: set
+      var: accumulator
+      value: {"add": [{"var": "accumulator"}, {"var": "item"}]}
+  outputs:
+    - name: Total
+      from: accumulator
+```
+
+##### call - User-Defined Function
+```yaml
+# Define function
+functions:
+  logic:
+    - name: double
+      args: [x]
+      returns: [result]
+      body:
+        - op: set
+          var: result
+          value: {"mul": [{"var": "x"}, 2]}
+
+# Call function
+blocks:
+  - type: logic
+    exec: 1
+    op: call
+    function: double
+    with:
+      x: 5
+    outputs:
+      - name: Doubled
+        from: var
+        var: result
+```
+
+##### recurse - Recursive Function
+```yaml
+# Factorial function using recursion
+- type: logic
+  exec: 1
+  op: recurse
+  name: factorial
+  function:
+    args: [n]
+    returns: [result]
+    base_case:
+      cond:
+        lte: [{"var": "n"}, 1]
+      value: [1]
+    body:
+      - op: set
+        var: n_minus_1
+        value: {"sub": [{"var": "n"}, 1]}
+      - op: call
+        name: factorial
+        with:
+          n: {"var": "n_minus_1"}
+        returns: [sub_result]
+      - op: set
+        var: result
+        value: {"mul": [{"var": "n"}, {"var": "sub_result"}]}
+  with:
+    n: 5
+  outputs:
+    - name: Factorial
+      from: value
+```
+
+##### for - List Iteration (v1 compatible)
+```yaml
 - type: logic
   exec: 3
   op: for
@@ -293,26 +435,36 @@ MEX provides a safe, Turing-complete expression language:
 ```
 
 #### Python Block
+
+##### v2: Inline Function
 ```yaml
-# v2: inline function
 - type: python
   exec: 1
   entrypoint: process
   function_code: |
     def process(ctx, data: dict) -> dict:
-        # ctx.vars: global variables
-        # ctx.get(path): get nested value
-        # ctx.set(path, val): set global variable
-        # ctx.log(level, msg): logging
+        # ctx.vars: Global variables dictionary
+        # ctx.get(path): Get nested value from context
+        # ctx.set(path, val): Set global variable
+        # ctx.log(level, msg): Log message (info, warning, error)
+        # ctx.emit(name, value): Emit value to collector
         
         ctx.log("info", f"Processing {len(data)} items")
+        
+        # Access global variables
+        counter = ctx.vars.get("counter", 0)
+        ctx.set("counter", counter + 1)
+        
         result = {"processed": len(data)}
         return result
   inputs:
     data: "{InputData}"
   outputs: [processed]
+  timeout_ms: 5000  # v2: Execution timeout
+```
 
-# v1: external file (still supported)
+##### v1: External File (Still Supported)
+```yaml
 - type: python
   exec: 2
   function: my_function
@@ -329,10 +481,11 @@ MEX provides a safe, Turing-complete expression language:
     - name: answer
       value: "{Result}"
     - name: metadata
-      value: "{Meta}"
-  include_vars:  # v2: include global vars
+      value: '{"status": "complete", "count": {counter}}'
+  include_vars:  # v2: Include global variables in output
     - counter
     - timestamp
+  final_mode: map  # v2: Output mode (map | list)
 ```
 
 ## Configuration
@@ -367,33 +520,53 @@ budgets:
 ### Global Variables (v2)
 ```yaml
 globals:
-  const:  # Read-only
+  const:  # Read-only constants
     APP_VERSION: "1.0"
     MAX_RETRIES: 3
-  vars:   # Mutable
+    API_ENDPOINT: "https://api.example.com"
+  vars:   # Mutable variables
     counter: 0
     state: "init"
     results: []
+```
+
+### User-Defined Functions (v2)
+```yaml
+functions:
+  logic:
+    - name: calculate_sum
+      args: [a, b]
+      returns: [sum]
+      body:
+        - op: set
+          var: sum
+          value: {"add": [{"var": "a"}, {"var": "b"}]}
+  
+  python:
+    - name: custom_transform
+      args: [data]
+      returns: [transformed]
+      # Implementation details...
 ```
 
 ## Migration from v1 to v2
 
 v1 YAML files work without changes. To leverage v2 features:
 
-1. Update version:
+### 1. Update Version
 ```yaml
 mabel:
   version: "2.0"  # was "1.0"
 ```
 
-2. Add global variables (optional):
+### 2. Add Global Variables (Optional)
 ```yaml
 globals:
   vars:
     my_var: 0
 ```
 
-3. Use MEX expressions in conditions:
+### 3. Use MEX Expressions
 ```yaml
 # v1 (JSON string, still works)
 run_if: "{\"equals\":[\"{ Status}\",\"ok\"]}"
@@ -403,14 +576,14 @@ run_if:
   eq: ["{Status}", "ok"]
 ```
 
-4. Use inline Python for simple functions:
+### 4. Use Inline Python
 ```yaml
 # v1 (external file)
 - type: python
   function: helper
   code_path: ./helper.py
 
-# v2 (inline)
+# v2 (inline, recommended for simple functions)
 - type: python
   entrypoint: helper
   function_code: |
@@ -418,12 +591,109 @@ run_if:
         return {"result": x * 2}
 ```
 
+### 5. Leverage New Logic Operators
+```yaml
+# Use set, let, while, reduce, call, recurse
+- type: logic
+  exec: 1
+  op: set
+  var: counter
+  value: {"add": [{"var": "counter"}, 1]}
+```
+
 ## Examples
 
 See `examples/` directory:
 - `sdg_demo.yaml` - v1.0 compatible example
 - `sdg_demo_v2.yaml` - v2.0 feature showcase
+- `sdg_comprehensive_v2.yaml` - Comprehensive v2.0 example with all features
 - `helpers.py` - External Python functions example
+- `data/` - Sample input/output data files
+
+## Advanced Features
+
+### Recursive Functions
+```yaml
+# Fibonacci using recursion
+- type: logic
+  exec: 1
+  op: recurse
+  name: fib
+  function:
+    args: [n]
+    returns: [result]
+    base_case:
+      cond:
+        lte: [{"var": "n"}, 1]
+      value: [{"var": "n"}]
+    body:
+      - op: set
+        var: n1
+        value: {"sub": [{"var": "n"}, 1]}
+      - op: set
+        var: n2
+        value: {"sub": [{"var": "n"}, 2]}
+      - op: call
+        name: fib
+        with: {n: {"var": "n1"}}
+        returns: [fib1]
+      - op: call
+        name: fib
+        with: {n: {"var": "n2"}}
+        returns: [fib2]
+      - op: set
+        var: result
+        value: {"add": [{"var": "fib1"}, {"var": "fib2"}]}
+  with: {n: 10}
+  outputs:
+    - name: Result
+      from: value
+```
+
+### Complex MEX Expressions
+```yaml
+# Nested conditionals and operations
+- type: logic
+  exec: 1
+  op: set
+  var: grade
+  value:
+    if:
+      cond: {"gte": [{"var": "score"}, 90]}
+      then: "A"
+      else:
+        if:
+          cond: {"gte": [{"var": "score"}, 80]}
+          then: "B"
+          else:
+            if:
+              cond: {"gte": [{"var": "score"}, 70]}
+              then: "C"
+              else: "F"
+```
+
+### AI with JSONPath
+```yaml
+- type: ai
+  exec: 1
+  model: gpt4
+  mode: json
+  prompts:
+    - "Generate a JSON object with fields: name, age, email"
+  outputs:
+    - name: Name
+      select: jsonpath
+      path: "$.name"
+      type_hint: string
+    - name: Age
+      select: jsonpath
+      path: "$.age"
+      type_hint: number
+    - name: Email
+      select: jsonpath
+      path: "$.email"
+      type_hint: string
+```
 
 ## License
 
@@ -435,3 +705,8 @@ Contributions welcome! Please ensure:
 - v1 compatibility is maintained
 - v2 features follow MABEL 2.0 specification
 - Tests pass for both v1 and v2 examples
+- Code is well-documented
+
+## Support
+
+For issues and feature requests, please use the GitHub issue tracker.
