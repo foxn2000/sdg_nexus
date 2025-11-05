@@ -1216,7 +1216,656 @@ MABEL v2.0の仕様に記載されているすべての機能が完全に実装�
 
 ---
 
-## 17. まとめ
+## 17. 実践的なYAML記述ガイド
+
+本節では、実際に動作する包括的なサンプルを基に、MABEL v2の各機能の具体的な書き方を解説する。
+
+### 17.1 基本構造の書き方
+
+#### トップレベル設定
+
+```yaml
+mabel:
+  version: "2.0"  # 必須: v2を示す
+  id: "com.example.agent.comprehensive_v2"  # 推奨: ユニークなID
+  name: "MABEL v2 Comprehensive Demo"  # 推奨: わかりやすい名前
+  description: "Demonstrates all v2 features"  # 推奨: 概要説明
+
+# v2: 統合仮想環境（推奨）
+runtime:
+  python:
+    interpreter: "python>=3.11,<3.13"  # Pythonバージョン指定
+    venv: ".venv"  # 仮想環境のパス
+    allow_network: false  # セキュリティのため既定でfalse
+    env:  # 環境変数（必要に応じて）
+      DEMO_MODE: "comprehensive"
+
+# v2: 予算制御（必須ではないが強く推奨）
+budgets:
+  loops:
+    max_iters: 1000  # ループの最大反復回数
+    on_exceed: "error"  # error | truncate | continue
+  recursion:
+    max_depth: 128  # 再帰の最大深度
+    on_exceed: "error"
+  wall_time_ms: 120000  # 全体の実行時間上限（2分）
+
+# グローバル変数の初期化
+globals:
+  const:  # 定数（上書き不可）
+    APP_NAME: "SDG Nexus Comprehensive Demo"
+    VERSION: "2.0.0"
+  vars:  # 変数（実行中に変更可能）
+    counter: 0
+    accumulator: 0
+    result_list: []
+```
+
+### 17.2 Logic ブロックの実践的な書き方
+
+#### 17.2.1 変数の初期化（`op: set`）
+
+```yaml
+# 基本的な変数代入
+- type: logic
+  exec: 1
+  id: init_vars
+  name: "Initialize Variables"
+  op: set
+  var: counter  # 変数名
+  value: 0  # 直接値を指定
+  outputs:
+    - name: InitCount
+      from: value  # 設定した値を出力
+```
+
+#### 17.2.2 CSVデータの解析（`op: for` with `parse: csv`）
+
+```yaml
+# CSV文字列をパースして数値のリストに変換
+- type: logic
+  exec: 2
+  id: parse_data
+  name: "Parse CSV Data"
+  op: for
+  list: "10,20,30,40,50"  # CSV形式の文字列
+  parse: csv  # カンマ区切りで分割
+  var: num  # 各要素の変数名
+  map: {"to_number": "{num}"}  # MEX式で数値に変換
+  outputs:
+    - name: Numbers
+      from: list  # 変換後のリスト全体を出力
+```
+
+#### 17.2.3 リストの畳み込み（`op: reduce`）
+
+```yaml
+# リストの合計を計算
+- type: logic
+  exec: 3
+  id: sum_reduce
+  name: "Sum with Reduce"
+  op: reduce
+  list: "{Numbers}"  # 入力リスト
+  value: 0  # 初期値
+  var: item  # 各要素の変数名
+  accumulator: accumulator  # アキュムレータ変数名
+  body:  # 各反復で実行する処理
+    - op: set
+      var: accumulator
+      value: {"add": [{"var": "accumulator"}, {"var": "item"}]}
+  outputs:
+    - name: TotalSum
+      from: accumulator  # 最終的なアキュムレータの値
+```
+
+#### 17.2.4 ローカル変数束縛（`op: let`）
+
+```yaml
+# ローカル変数を使った計算
+- type: logic
+  exec: 4
+  id: calc_with_let
+  name: "Calculate with Let"
+  op: let
+  bindings:  # ローカル変数の定義
+    x: 10
+    y: 5
+    z: 3
+  body:  # ローカル変数を使った処理
+    - op: set
+      var: temp_result  # グローバル変数に結果を保存
+      value:
+        add:
+          - {"mul": [{"var": "x"}, {"var": "y"}]}  # x * y
+          - {"var": "z"}  # + z
+  outputs:
+    - name: LetResult
+      from: var
+      var: temp_result  # グローバル変数から出力
+```
+
+#### 17.2.5 ユーザ定義関数の呼び出し（`op: call`）
+
+```yaml
+# トップレベルで関数を定義
+functions:
+  logic:
+    - name: "square"
+      args: [x]  # 引数リスト
+      returns: [result]  # 戻り値リスト
+      body:
+        - op: set
+          var: result
+          value: {"mul": [{"var": "x"}, {"var": "x"}]}
+
+# ブロックで関数を呼び出し
+blocks:
+  - type: logic
+    exec: 5
+    id: call_square
+    name: "Call Square Function"
+    op: call
+    function: "square"  # 関数名
+    with:  # 引数を渡す
+      x: 12
+    returns: [squared_value]  # 戻り値の受け取り（未使用）
+    outputs:
+      - name: SquareResult
+        from: var
+        var: result  # 関数内で設定された変数を参照
+```
+
+#### 17.2.6 While ループ（`op: while`）
+
+```yaml
+# 条件付き反復処理
+- type: logic
+  exec: 6
+  id: while_loop
+  name: "While Loop Demo"
+  op: while
+  init:  # ループ前の初期化
+    - op: set
+      var: i
+      value: 1
+    - op: set
+      var: result_list
+      value: []
+  cond:  # ループ継続条件（MEX式）
+    le:
+      - {"var": "i"}
+      - 5
+  step:  # 各反復で実行
+    - op: emit  # 値を収集
+      value:
+        concat:
+          - "Step "
+          - {"to_string": {"var": "i"}}
+          - ": "
+          - {"to_string": {"mul": [{"var": "i"}, {"var": "i"}]}}
+    - op: set  # カウンタをインクリメント
+      var: i
+      value: {"add": [{"var": "i"}, 1]}
+  budget:  # ループ専用の予算
+    loops:
+      max_iters: 10
+      on_exceed: "truncate"
+  outputs:
+    - name: WhileSteps
+      from: list  # emitで収集した値のリスト
+    - name: WhileCount
+      from: count  # 反復回数
+```
+
+#### 17.2.7 再帰関数（`op: recurse`）
+
+```yaml
+# フィボナッチ数列を再帰で計算
+- type: logic
+  exec: 7
+  id: fibonacci
+  name: "Fibonacci with Recursion"
+  op: recurse
+  name: "fib"  # 再帰関数名（自己参照用）
+  function:
+    args: [n]  # 引数
+    returns: [f]  # 戻り値
+    base_case:  # 基底ケース
+      cond:
+        le:
+          - {"var": "n"}
+          - 1
+      value: [1]  # n <= 1 のとき1を返す
+    body:  # 再帰ケース
+      - op: call  # 自己呼び出し1
+        name: "fib"
+        with:
+          n: {"sub": [{"var": "n"}, 1]}
+        returns: [a]
+      - op: call  # 自己呼び出し2
+        name: "fib"
+        with:
+          n: {"sub": [{"var": "n"}, 2]}
+        returns: [b]
+      - op: set  # 結果を計算
+        var: f
+        value: {"add": [{"var": "a"}, {"var": "b"}]}
+  with:  # 初回呼び出しの引数
+    n: 10
+  budget:  # 再帰専用の予算
+    recursion:
+      max_depth: 64
+      on_exceed: "error"
+  outputs:
+    - name: Fibonacci10
+      from: value  # 最終的なfの値
+```
+
+#### 17.2.8 Case式による条件分岐
+
+```yaml
+# 値に応じた分類
+- type: logic
+  exec: 8
+  id: categorize
+  name: "Categorize with Case"
+  op: set
+  var: category
+  value:
+    case:
+      when:  # 条件とその結果のリスト
+        - cond: {"lt": ["{TotalSum}", 100]}
+          value: "small"
+        - cond: {"lt": ["{TotalSum}", 200]}
+          value: "medium"
+        - cond: true  # デフォルトケース
+          value: "large"
+  outputs:
+    - name: Category
+      from: var
+      var: category
+```
+
+### 17.3 Python ブロックの実践的な書き方
+
+#### 17.3.1 インラインPython（基本）
+
+```yaml
+# 標準ライブラリを使った統計計算
+- type: python
+  exec: 9
+  id: stats_calc
+  name: "Statistics Calculation"
+  entrypoint: "calculate_stats"  # 呼び出す関数名
+  function_code: |  # インラインコード
+    import statistics
+    
+    def calculate_stats(ctx, numbers: list) -> dict:
+        """標準ライブラリを使った統計計算"""
+        if not numbers:
+            return {"Statistics": {}}
+        
+        # ctx.log でログ出力
+        ctx.log("info", f"Calculating stats for {len(numbers)} numbers")
+        
+        stats = {
+            "Mean": statistics.mean(numbers),
+            "Median": statistics.median(numbers),
+            "StdDev": statistics.stdev(numbers) if len(numbers) > 1 else 0.0,
+            "Min": min(numbers),
+            "Max": max(numbers),
+            "Sum": sum(numbers),
+            "Count": len(numbers)
+        }
+        
+        # グローバル変数にも保存
+        ctx.vars['stats'] = stats
+        
+        return {"Statistics": stats}
+  inputs:  # 引数（辞書形式）
+    numbers: "{Numbers}"
+  outputs: [Statistics]  # 戻り値のキー
+  use_env: "global"  # runtime.python.venvを使用
+  timeout_ms: 10000  # タイムアウト
+  ctx_access: ["vars.write"]  # 権限宣言
+```
+
+#### 17.3.2 外部Pythonファイルの使用
+
+```yaml
+# 外部ファイルの関数を呼び出し
+- type: python
+  exec: 10
+  id: format_external
+  name: "Format with External Helper"
+  run_if:  # 条件付き実行
+    regex_match:
+      string: "helpers.py"
+      pattern: ".+"
+  function: format_comprehensive_result  # 外部ファイル内の関数名
+  code_path: ./examples/helpers.py  # ファイルパス
+  inputs:  # 引数
+    total: "{TotalSum}"
+    fib: "{Fibonacci10}"
+    steps: "{WhileSteps}"
+    category: "{Category}"
+    stats: "{Statistics}"
+  outputs: [FormattedOutput]
+  on_error: "continue"  # エラー時は続行
+```
+
+#### 17.3.3 個別仮想環境（override_env）
+
+```yaml
+# プロジェクト固有の環境を使用
+- type: python
+  exec: 14
+  id: custom_env_demo
+  name: "Custom Environment Demo"
+  entrypoint: "main"
+  function_code: |
+    def main(ctx, **inputs) -> dict:
+        import platform
+        import sys
+        
+        info = {
+            "PythonVersion": sys.version,
+            "Platform": platform.platform(),
+            "Processor": platform.processor()
+        }
+        
+        return {"EnvInfo": info}
+  outputs: [EnvInfo]
+  use_env: "override"  # 個別環境を使用
+  override_env:
+    venv: ".venv_custom"  # 別の仮想環境
+    allow_network: false
+```
+
+### 17.4 MEX式の実践的な書き方
+
+#### 17.4.1 正規表現の使用
+
+```yaml
+# 文字列から単語を抽出
+- type: logic
+  exec: 12
+  id: regex_demo
+  name: "Regex Operations"
+  op: set
+  var: extracted
+  value:
+    regex_extract:
+      text: "{ValidationStatus}"  # 対象文字列
+      pattern: "\\w+"  # パターン（バックスラッシュをエスケープ）
+      index: 0  # 最初のマッチ
+  outputs:
+    - name: FirstWord
+      from: var
+      var: extracted
+```
+
+#### 17.4.2 文字列操作のチェーン
+
+```yaml
+# 複数の操作を組み合わせ
+- type: logic
+  exec: 13
+  id: string_ops
+  name: "String Operations"
+  op: set
+  var: processed_string
+  value:
+    upper:  # 大文字化
+      trim:  # 空白削除
+        concat:  # 文字列結合
+          - "  result: "
+          - {"to_string": "{TotalSum}"}
+          - "  "
+  outputs:
+    - name: ProcessedString
+      from: var
+      var: processed_string
+```
+
+#### 17.4.3 時間と乱数
+
+```yaml
+# 現在時刻と乱数を取得
+- type: logic
+  exec: 15
+  id: time_rand
+  name: "Time and Random"
+  op: let
+  bindings:
+    timestamp: {"now": null}  # 現在のUNIXタイムスタンプ
+    random_num: {"rand": {"min": 1, "max": 100}}  # 1-100の乱数
+  body:
+    - op: set
+      var: time_info
+      value:
+        concat:
+          - "Timestamp: "
+          - {"to_string": {"var": "timestamp"}}
+          - ", Random: "
+          - {"to_string": {"var": "random_num"}}
+  outputs:
+    - name: TimeInfo
+      from: var
+      var: time_info
+```
+
+### 17.5 コレクション操作
+
+```yaml
+# リストから重複を削除してソート
+- type: logic
+  exec: 16
+  id: set_sample_list
+  name: "Set Sample List"
+  op: set
+  var: sample_list
+  value: [5, 2, 8, 2, 5, 1, 8, 3]
+  outputs:
+    - name: SampleList
+      from: value
+
+- type: logic
+  exec: 17
+  id: collection_ops
+  name: "Collection Operations"
+  op: for
+  list: "{sample_list}"
+  var: x
+  outputs:
+    - name: UniqueNumbers
+      from: value
+      source: raw
+      value:
+        sort:  # ソート
+          unique: "{x}"  # 重複削除
+    - name: ItemCount
+      from: count
+```
+
+### 17.6 条件付き実行（run_if）
+
+```yaml
+# MEX式による条件判定
+- type: logic
+  exec: 11
+  id: validation
+  name: "Validate Results"
+  op: if
+  cond:
+    and:  # 複数条件のAND
+      - {"gt": ["{TotalSum}", 0]}
+      - {"gt": ["{Fibonacci10}", 0]}
+      - {"gt": ["{WhileCount}", 0]}
+      - or:  # 内部でOR
+          - {"eq": ["{Category}", "small"]}
+          - {"eq": ["{Category}", "medium"]}
+          - {"eq": ["{Category}", "large"]}
+  then: "All validations passed"
+  else: "Validation failed"
+  outputs:
+    - name: ValidationStatus
+      from: value
+    - name: IsValid
+      from: boolean
+```
+
+### 17.7 End ブロックの書き方
+
+```yaml
+# 最終出力の構築
+- type: end
+  exec: 100
+  reason: "comprehensive_demo_completed"
+  exit_code: "success"
+  final:  # 出力する値のリスト
+    - name: summary
+      value: "{FinalSummary}"
+    - name: total_sum
+      value: "{TotalSum}"
+    - name: fibonacci_10
+      value: "{Fibonacci10}"
+    - name: validation_status
+      value: "{ValidationStatus}"
+    - name: statistics
+      value: "{Statistics}"
+  final_mode: "map"  # map形式で出力（既定）
+  include_vars:  # グローバル変数も含める
+    - counter
+    - accumulator
+    - category
+```
+
+### 17.8 明示的な接続定義
+
+```yaml
+# ブロック間の接続を明示
+connections:
+  - from: parse_data  # 出力元ブロックID
+    output: Numbers  # 出力名
+    to: sum_reduce  # 入力先ブロックID
+    input: list  # 入力パラメータ名
+  - from: fibonacci
+    output: Fibonacci10
+    to: validation
+    input: fib
+```
+
+### 17.9 よくあるエラーと対処法
+
+#### エラー1: `KeyError: 'text'`
+```yaml
+# ❌ 間違い
+value:
+  regex_extract:
+    string: "{ValidationStatus}"  # 'string'は不正
+    pattern: "\\w+"
+
+# ✅ 正しい
+value:
+  regex_extract:
+    text: "{ValidationStatus}"  # 'text'を使用
+    pattern: "\\w+"
+```
+
+#### エラー2: `TypeError: unhashable type: 'list'`
+```yaml
+# ❌ 間違い: listに直接配列を渡す
+- type: logic
+  op: for
+  list: [5, 2, 8, 2, 5]  # エラー
+  var: x
+
+# ✅ 正しい: 先に変数に保存
+- type: logic
+  op: set
+  var: sample_list
+  value: [5, 2, 8, 2, 5]
+  outputs:
+    - name: SampleList
+      from: value
+
+- type: logic
+  op: for
+  list: "{sample_list}"  # 変数参照
+  var: x
+```
+
+#### エラー3: `ValueError: python block requires 'function' or 'entrypoint'`
+```yaml
+# ❌ 間違い: 関数名の指定がない
+- type: python
+  function_code: |
+    def main(ctx, **inputs):
+        return {}
+  outputs: [Result]
+
+# ✅ 正しい: entrypointを指定
+- type: python
+  entrypoint: "main"  # または function: "main"
+  function_code: |
+    def main(ctx, **inputs):
+        return {}
+  outputs: [Result]
+```
+
+### 17.10 ベストプラクティス
+
+1. **予算制御は必ず設定する**
+   ```yaml
+   budgets:
+     loops: { max_iters: 1000, on_exceed: "error" }
+     recursion: { max_depth: 128, on_exceed: "error" }
+   ```
+
+2. **ブロックにはIDと名前を付ける**
+   ```yaml
+   - type: logic
+     exec: 1
+     id: init_vars  # 一意なID
+     name: "Initialize Variables"  # わかりやすい名前
+   ```
+
+3. **Python関数は型ヒントを使う**
+   ```python
+   def calculate_stats(ctx, numbers: list) -> dict:
+       """関数の説明"""
+       return {"Statistics": {...}}
+   ```
+
+4. **MEX式は読みやすく構造化する**
+   ```yaml
+   # ✅ 良い例
+   value:
+     add:
+       - {"mul": [{"var": "x"}, {"var": "y"}]}
+       - {"var": "z"}
+   
+   # ❌ 悪い例（一行に詰め込まない）
+   value: {"add":[{"mul":[{"var":"x"},{"var":"y"}]},{"var":"z"}]}
+   ```
+
+5. **エラーハンドリングを明示する**
+   ```yaml
+   - type: python
+     exec: 10
+     on_error: "continue"  # エラー時の動作を指定
+     retry:  # リトライ設定
+       max_attempts: 3
+       backoff:
+         type: "exponential"
+         base_ms: 1000
+   ```
+
+---
+
+## 18. まとめ
 
 MABEL v2.0は、AIエージェントの処理フローをYAMLで宣言的に記述できる完全な仕様言語です。
 

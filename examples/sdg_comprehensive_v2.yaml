@@ -1,0 +1,531 @@
+mabel:
+  version: "2.0"
+  id: "com.example.agent.comprehensive_v2"
+  name: "MABEL v2 Comprehensive Demo"
+  description: "Demonstrates all v2 features without AI: runtime, functions, recurse, reduce, let, templates, files, connections"
+
+# v2: 統合仮想環境設定
+runtime:
+  python:
+    interpreter: "python>=3.11,<3.13"
+    venv: ".venv"
+    allow_network: false
+    env:
+      DEMO_MODE: "comprehensive"
+
+# v2: グローバル予算設定
+budgets:
+  loops:
+    max_iters: 1000
+    on_exceed: "error"
+  recursion:
+    max_depth: 128
+    on_exceed: "error"
+  wall_time_ms: 120000
+
+# v2: グローバル変数/定数
+globals:
+  const:
+    APP_NAME: "SDG Nexus Comprehensive Demo"
+    VERSION: "2.0.0"
+    MAX_FIBONACCI: 15
+  vars:
+    counter: 0
+    accumulator: 0
+    memo: {}
+    result_list: []
+
+# v2: 文字列テンプレート
+templates:
+  - name: "header"
+    text: |
+      ==========================================
+      {APP_NAME} v{VERSION}
+      ==========================================
+  - name: "section"
+    text: |
+      
+      --- {title} ---
+      {content}
+
+# v2: 組み込みファイル
+files:
+  - name: "sample_data.txt"
+    mime: "text/plain"
+    content: "10,20,30,40,50"
+
+# v2: ユーザ定義関数
+functions:
+  logic:
+    - name: "square"
+      args: [x]
+      returns: [result]
+      body:
+        - op: set
+          var: result
+          value: {"mul": [{"var": "x"}, {"var": "x"}]}
+    
+    - name: "increment"
+      args: [n]
+      returns: [incremented]
+      body:
+        - op: set
+          var: incremented
+          value: {"add": [{"var": "n"}, 1]}
+
+blocks:
+  # 1. 初期化: setでカウンタとアキュムレータをリセット
+  - type: logic
+    exec: 1
+    id: init_vars
+    name: "Initialize Variables"
+    op: set
+    var: counter
+    value: 0
+    outputs:
+      - name: InitCount
+        from: value
+
+  # 2. ファイルデータ読み込みとパース（logic.for with parse: csv）
+  - type: logic
+    exec: 2
+    id: parse_data
+    name: "Parse CSV Data"
+    op: for
+    list: "10,20,30,40,50"
+    parse: csv
+    var: num
+    map: {"to_number": "{num}"}
+    outputs:
+      - name: Numbers
+        from: list
+
+  # 3. reduce演算子でリストの合計を計算
+  - type: logic
+    exec: 3
+    id: sum_reduce
+    name: "Sum with Reduce"
+    op: reduce
+    list: "{Numbers}"
+    value: 0
+    var: item
+    accumulator: accumulator
+    body:
+      - op: set
+        var: accumulator
+        value: {"add": [{"var": "accumulator"}, {"var": "item"}]}
+    outputs:
+      - name: TotalSum
+        from: accumulator
+
+  # 4. let演算子でローカル変数を使った計算
+  - type: logic
+    exec: 4
+    id: calc_with_let
+    name: "Calculate with Let"
+    op: let
+    bindings:
+      x: 10
+      y: 5
+      z: 3
+    body:
+      - op: set
+        var: temp_result
+        value:
+          add:
+            - {"mul": [{"var": "x"}, {"var": "y"}]}
+            - {"var": "z"}
+    outputs:
+      - name: LetResult
+        from: var
+        var: temp_result
+
+  # 5. ユーザ定義関数の呼び出し（call）
+  - type: logic
+    exec: 5
+    id: call_square
+    name: "Call Square Function"
+    op: call
+    function: "square"
+    with:
+      x: 12
+    returns: [squared_value]
+    outputs:
+      - name: SquareResult
+        from: var
+        var: result
+
+  # 6. while ループで反復処理
+  - type: logic
+    exec: 6
+    id: while_loop
+    name: "While Loop Demo"
+    op: while
+    init:
+      - op: set
+        var: i
+        value: 1
+      - op: set
+        var: result_list
+        value: []
+    cond:
+      le:
+        - {"var": "i"}
+        - 5
+    step:
+      - op: emit
+        value:
+          concat:
+            - "Step "
+            - {"to_string": {"var": "i"}}
+            - ": "
+            - {"to_string": {"mul": [{"var": "i"}, {"var": "i"}]}}
+      - op: set
+        var: i
+        value: {"add": [{"var": "i"}, 1]}
+    budget:
+      loops:
+        max_iters: 10
+        on_exceed: "truncate"
+    outputs:
+      - name: WhileSteps
+        from: list
+      - name: WhileCount
+        from: count
+
+  # 7. recurse演算子でフィボナッチ数列を計算（メモ化あり）
+  - type: logic
+    exec: 7
+    id: fibonacci
+    name: "Fibonacci with Recursion"
+    op: recurse
+    name: "fib"
+    function:
+      args: [n]
+      returns: [f]
+      base_case:
+        cond:
+          le:
+            - {"var": "n"}
+            - 1
+        value: [1]
+      body:
+        - op: call
+          name: "fib"
+          with:
+            n: {"sub": [{"var": "n"}, 1]}
+          returns: [a]
+        - op: call
+          name: "fib"
+          with:
+            n: {"sub": [{"var": "n"}, 2]}
+          returns: [b]
+        - op: set
+          var: f
+          value: {"add": [{"var": "a"}, {"var": "b"}]}
+    with:
+      n: 10
+    budget:
+      recursion:
+        max_depth: 64
+        on_exceed: "error"
+    outputs:
+      - name: Fibonacci10
+        from: value
+
+  # 8. MEX式の高度な使用例（case演算子）
+  - type: logic
+    exec: 8
+    id: categorize
+    name: "Categorize with Case"
+    op: set
+    var: category
+    value:
+      case:
+        when:
+          - cond: {"lt": ["{TotalSum}", 100]}
+            value: "small"
+          - cond: {"lt": ["{TotalSum}", 200]}
+            value: "medium"
+          - cond: true
+            value: "large"
+    outputs:
+      - name: Category
+        from: var
+        var: category
+
+  # 9. インラインPython（標準ライブラリで統計計算）
+  - type: python
+    exec: 9
+    id: stats_calc
+    name: "Statistics Calculation"
+    entrypoint: "calculate_stats"
+    function_code: |
+      import statistics
+      
+      def calculate_stats(ctx, numbers: list) -> dict:
+          """標準ライブラリを使った統計計算"""
+          if not numbers:
+              return {"Statistics": {}}
+          
+          ctx.log("info", f"Calculating stats for {len(numbers)} numbers")
+          
+          stats = {
+              "Mean": statistics.mean(numbers),
+              "Median": statistics.median(numbers),
+              "StdDev": statistics.stdev(numbers) if len(numbers) > 1 else 0.0,
+              "Min": min(numbers),
+              "Max": max(numbers),
+              "Sum": sum(numbers),
+              "Count": len(numbers)
+          }
+          
+          # グローバル変数にも保存
+          ctx.vars['stats'] = stats
+          
+          return {"Statistics": stats}
+    inputs:
+      numbers: "{Numbers}"
+    outputs: [Statistics]
+    use_env: "global"
+    timeout_ms: 10000
+    ctx_access: ["vars.write"]
+
+  # 10. 外部Pythonファイル使用（存在する場合）
+  - type: python
+    exec: 10
+    id: format_external
+    name: "Format with External Helper"
+    run_if:
+      regex_match:
+        string: "helpers.py"
+        pattern: ".+"
+    function: format_comprehensive_result
+    code_path: ./examples/helpers.py
+    inputs:
+      total: "{TotalSum}"
+      fib: "{Fibonacci10}"
+      steps: "{WhileSteps}"
+      category: "{Category}"
+      stats: "{Statistics}"
+    outputs: [FormattedOutput]
+    on_error: "continue"
+
+  # 11. 条件分岐と論理演算（MEX）
+  - type: logic
+    exec: 11
+    id: validation
+    name: "Validate Results"
+    op: if
+    cond:
+      and:
+        - {"gt": ["{TotalSum}", 0]}
+        - {"gt": ["{Fibonacci10}", 0]}
+        - {"gt": ["{WhileCount}", 0]}
+        - or:
+            - {"eq": ["{Category}", "small"]}
+            - {"eq": ["{Category}", "medium"]}
+            - {"eq": ["{Category}", "large"]}
+    then: "All validations passed"
+    else: "Validation failed"
+    outputs:
+      - name: ValidationStatus
+        from: value
+      - name: IsValid
+        from: boolean
+
+  # 12. 正規表現処理
+  - type: logic
+    exec: 12
+    id: regex_demo
+    name: "Regex Operations"
+    op: set
+    var: extracted
+    value:
+      regex_extract:
+        text: "{ValidationStatus}"
+        pattern: "\\w+"
+        index: 0
+    outputs:
+      - name: FirstWord
+        from: var
+        var: extracted
+
+  # 13. 文字列操作のデモ
+  - type: logic
+    exec: 13
+    id: string_ops
+    name: "String Operations"
+    op: set
+    var: processed_string
+    value:
+      upper:
+        trim:
+          concat:
+            - "  result: "
+            - {"to_string": "{TotalSum}"}
+            - "  "
+    outputs:
+      - name: ProcessedString
+        from: var
+        var: processed_string
+
+  # 14. Python override_env のデモ（個別環境）
+  - type: python
+    exec: 14
+    id: custom_env_demo
+    name: "Custom Environment Demo"
+    entrypoint: "main"
+    function_code: |
+      def main(ctx, **inputs) -> dict:
+          import platform
+          import sys
+          
+          info = {
+              "PythonVersion": sys.version,
+              "Platform": platform.platform(),
+              "Processor": platform.processor()
+          }
+          
+          return {"EnvInfo": info}
+    outputs: [EnvInfo]
+    use_env: "override"
+    override_env:
+      venv: ".venv_custom"
+      allow_network: false
+
+  # 15. 時間と乱数のデモ
+  - type: logic
+    exec: 15
+    id: time_rand
+    name: "Time and Random"
+    op: let
+    bindings:
+      timestamp: {"now": null}
+      random_num: {"rand": {"min": 1, "max": 100}}
+    body:
+      - op: set
+        var: time_info
+        value:
+          concat:
+            - "Timestamp: "
+            - {"to_string": {"var": "timestamp"}}
+            - ", Random: "
+            - {"to_string": {"var": "random_num"}}
+    outputs:
+      - name: TimeInfo
+        from: var
+        var: time_info
+
+  # 16. コレクション操作（unique, sort）
+  - type: logic
+    exec: 16
+    id: set_sample_list
+    name: "Set Sample List"
+    op: set
+    var: sample_list
+    value: [5, 2, 8, 2, 5, 1, 8, 3]
+    outputs:
+      - name: SampleList
+        from: value
+
+  - type: logic
+    exec: 17
+    id: collection_ops
+    name: "Collection Operations"
+    op: for
+    list: "{sample_list}"
+    var: x
+    outputs:
+      - name: UniqueNumbers
+        from: value
+        source: raw
+        value:
+          sort:
+            unique: "{x}"
+      - name: ItemCount
+        from: count
+
+  # 18. 最終集計（インラインPython）
+  - type: python
+    exec: 18
+    id: final_summary
+    name: "Final Summary"
+    entrypoint: "main"
+    function_code: |
+      def main(ctx, **inputs) -> dict:
+          """最終結果を整形"""
+          
+          summary_lines = [
+              f"=== {ctx.vars.get('APP_NAME', 'Demo')} ===",
+              "",
+              f"1. Numbers Parsed: {inputs.get('numbers', [])}",
+              f"2. Total Sum: {inputs.get('total', 0)}",
+              f"3. Category: {inputs.get('category', 'unknown')}",
+              f"4. Let Result: {inputs.get('let_result', 0)}",
+              f"5. Square of 12: {inputs.get('square', 0)}",
+              f"6. While Loop Steps: {inputs.get('while_count', 0)}",
+              f"7. Fibonacci(10): {inputs.get('fib', 0)}",
+              f"8. Statistics: {inputs.get('stats', {})}",
+              f"9. Validation: {inputs.get('validation', 'N/A')}",
+              f"10. Processed String: {inputs.get('processed', '')}",
+              f"11. Time Info: {inputs.get('time_info', '')}",
+              f"12. Unique Numbers: {inputs.get('unique', [])}",
+              "",
+              f"Status: {inputs.get('is_valid', False)}",
+          ]
+          
+          summary = "\n".join(summary_lines)
+          
+          ctx.log("info", "Final summary generated successfully")
+          
+          return {"FinalSummary": summary}
+    inputs:
+      numbers: "{Numbers}"
+      total: "{TotalSum}"
+      category: "{Category}"
+      let_result: "{LetResult}"
+      square: "{SquareResult}"
+      while_count: "{WhileCount}"
+      fib: "{Fibonacci10}"
+      stats: "{Statistics}"
+      validation: "{ValidationStatus}"
+      is_valid: "{IsValid}"
+      processed: "{ProcessedString}"
+      time_info: "{TimeInfo}"
+      unique: "{UniqueNumbers}"
+    outputs: [FinalSummary]
+    ctx_access: ["vars.read"]
+
+  # 19. 終了ブロック
+  - type: end
+    exec: 100
+    reason: "comprehensive_demo_completed"
+    exit_code: "success"
+    final:
+      - name: summary
+        value: "{FinalSummary}"
+      - name: total_sum
+        value: "{TotalSum}"
+      - name: fibonacci_10
+        value: "{Fibonacci10}"
+      - name: validation_status
+        value: "{ValidationStatus}"
+      - name: statistics
+        value: "{Statistics}"
+    final_mode: "map"
+    include_vars:
+      - counter
+      - accumulator
+      - category
+
+# v2: 明示的な接続定義（オプション、自動配線で十分な場合は不要）
+connections:
+  - from: parse_data
+    output: Numbers
+    to: sum_reduce
+    input: list
+  - from: fibonacci
+    output: Fibonacci10
+    to: validation
+    input: fib
