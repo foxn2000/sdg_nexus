@@ -790,8 +790,14 @@ async def run_pipeline(
                     
                     # 引数準備
                     if isinstance(block.inputs, dict):
-                        # v2: キーワード引数
-                        kwargs = {k: ctx.get(v) for k, v in block.inputs.items()}
+                        # v2: キーワード引数（テンプレート展開をサポート）
+                        kwargs = {}
+                        for k, v in block.inputs.items():
+                            if isinstance(v, str):
+                                # テンプレート形式の場合は展開
+                                kwargs[k] = render_template(v, ctx)
+                            else:
+                                kwargs[k] = v
                         out = fn(py_ctx, **kwargs)
                     else:
                         # v1: 位置引数

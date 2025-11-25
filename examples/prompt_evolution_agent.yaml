@@ -1,0 +1,277 @@
+# プロンプト進化エージェント
+# ユーザー入力から新しいプロンプトを生成し、難易度を上げ、妥当性をチェックして最終回答を取得
+
+mabel:
+  version: "2.0"
+  id: "com.example.agent.prompt_evolution"
+  name: "Prompt Evolution Agent"
+  description: "入力から異なるプロンプトを生成し、難易度を上げ、妥当性チェック後に回答を取得するエージェント"
+
+# モデル設定
+models:
+  - name: qwen3
+    api_model: qwen3
+    api_key: "sk-local"
+    base_url: http://localhost:8000/v1
+    request_defaults:
+      temperature: 0.7
+      max_tokens: 2048
+
+# グローバル変数
+globals:
+  const:
+    MAX_RETRY: 2
+  vars:
+    retry_count: 0
+    is_valid: false
+    current_prompt: ""
+    enhanced_prompt: ""
+    final_prompt: ""
+    final_answer: ""
+
+# 予算設定
+budgets:
+  loops:
+    max_iters: 10
+    on_exceed: "truncate"
+  recursion:
+    max_depth: 8
+    on_exceed: "error"
+  wall_time_ms: 300000
+
+blocks:
+  # 1. 初期化
+  - type: logic
+    exec: 1
+    id: init
+    name: "Initialize Variables"
+    op: set
+    var: retry_count
+    value: 0
+    outputs:
+      - name: RetryCount
+        from: value
+
+  # 2. ステップ1: プロンプト生成（ユーザー入力から異なるプロンプトを生成）
+  - type: ai
+    exec: 2
+    id: generate_prompt
+    name: "Generate New Prompt"
+    model: qwen3
+    system_prompt: |
+      あなたは創造的なプロンプトエンジニアです。
+      ユーザーから与えられた入力を分析し、それとは全く異なる主旨・内容の新しいプロンプトを生成してください。
+      
+      重要なルール：
+      1. 元の入力のテーマや内容とは全く異なるものを作成すること
+      2. 生成したプロンプトは必ず <prompt>...</prompt> タグで囲むこと
+      3. プロンプトは具体的で、明確な指示を含むこと
+      
+      出力形式：
+      <think>あなたの思考プロセス</think>
+      <prompt>生成したプロンプト内容</prompt>
+    prompts:
+      - |
+        以下の入力から、全く異なる主旨・内容のプロンプトを新たに生成してください：
+        
+        入力: {input}
+    outputs:
+      - name: GeneratedPrompt
+        select: tag
+        tag: prompt
+      - name: GenerateThinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        current_prompt: GeneratedPrompt
+
+  # 3. ステップ2: プロンプトの難易度向上
+  - type: ai
+    exec: 3
+    id: enhance_prompt
+    name: "Enhance Prompt Difficulty"
+    model: qwen3
+    system_prompt: |
+      あなたは高度なプロンプトエンジニアです。
+      与えられたプロンプトをより難易度の高いものに再加工してください。
+      
+      難易度向上の方法：
+      1. より深い分析や考察を要求する
+      2. 複数の視点からの検討を求める
+      3. 制約条件や追加の要求を加える
+      4. 専門的な知識や論理的思考を必要とする要素を追加
+      
+      重要：難易度を高めたプロンプトは必ず <prompt>...</prompt> タグで囲むこと
+      
+      出力形式：
+      <think>あなたの思考プロセス</think>
+      <prompt>難易度を高めたプロンプト内容</prompt>
+    prompts:
+      - |
+        以下のプロンプトの難易度を高めてください：
+        
+        元のプロンプト: {GeneratedPrompt}
+    outputs:
+      - name: EnhancedPrompt
+        select: tag
+        tag: prompt
+      - name: EnhanceThinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        enhanced_prompt: EnhancedPrompt
+
+  # 4. ステップ3: プロンプトの妥当性チェック
+  - type: ai
+    exec: 4
+    id: validate_prompt
+    name: "Validate Prompt"
+    model: qwen3
+    system_prompt: |
+      あなたはプロンプトの妥当性を評価する専門家です。
+      与えられたプロンプトが実際に成立するかどうかを判定してください。
+      
+      判定基準：
+      1. プロンプトが明確で理解可能か
+      2. 要求されている内容が実現可能か
+      3. 論理的な矛盾がないか
+      4. 適切な回答が可能か
+      
+      判定結果：
+      - 成立する場合: <valid>true</valid>
+      - 成立しない場合: <valid>false</valid> と <reason>理由</reason>
+      
+      出力形式：
+      <think>あなたの思考プロセス</think>
+      <valid>true または false</valid>
+      <reason>成立しない場合の理由（成立する場合は空欄可）</reason>
+    prompts:
+      - |
+        以下のプロンプトが実際に成立するかどうかを判定してください：
+        
+        プロンプト: {EnhancedPrompt}
+    outputs:
+      - name: IsValid
+        select: tag
+        tag: valid
+      - name: InvalidReason
+        select: tag
+        tag: reason
+      - name: ValidateThinking
+        select: tag
+        tag: think
+
+  # 5. 妥当性判定結果の処理
+  - type: logic
+    exec: 5
+    id: check_validation
+    name: "Check Validation Result"
+    op: if
+    cond:
+      or:
+        - equals: ["{IsValid}", "true"]
+        - contains: ["{IsValid}", "true"]
+    then: "valid"
+    else: "invalid"
+    outputs:
+      - name: ValidationStatus
+        from: value
+      - name: IsPromptValid
+        from: boolean
+
+  # 6. 最終プロンプトの確定（MEX refを使用）
+  - type: logic
+    exec: 6
+    id: set_final_prompt
+    name: "Set Final Prompt"
+    op: set
+    var: final_prompt
+    value: {"ref": "EnhancedPrompt"}
+    outputs:
+      - name: FinalPrompt
+        from: value
+
+  # 7. ステップ4: 最終回答の取得
+  - type: ai
+    exec: 7
+    id: get_final_answer
+    name: "Get Final Answer"
+    model: qwen3
+    system_prompt: |
+      あなたは高度な知識と論理的思考能力を持つAIアシスタントです。
+      与えられたプロンプトに対して、詳細かつ包括的な回答を提供してください。
+      
+      回答のガイドライン：
+      1. プロンプトの要求を正確に理解する
+      2. 論理的で構造化された回答を提供する
+      3. 必要に応じて具体例や説明を含める
+      4. 回答は <answer>...</answer> タグで囲む
+      
+      出力形式：
+      <think>あなたの思考プロセス</think>
+      <answer>詳細な回答内容</answer>
+    prompts:
+      - |
+        以下のプロンプトに回答してください：
+        
+        {FinalPrompt}
+    outputs:
+      - name: FinalAnswer
+        select: tag
+        tag: answer
+      - name: AnswerThinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        final_answer: FinalAnswer
+
+  # 8. 結果の整形（外部Pythonファイル使用）
+  - type: python
+    exec: 8
+    id: format_result
+    name: "Format Final Result"
+    function: format_prompt_evolution
+    code_path: ./examples/helpers.py
+    inputs:
+      original_input: "{input}"
+      generated_prompt: "{GeneratedPrompt}"
+      enhanced_prompt: "{EnhancedPrompt}"
+      is_valid: "{IsValid}"
+      final_answer: "{FinalAnswer}"
+      generate_thinking: "{GenerateThinking}"
+      enhance_thinking: "{EnhanceThinking}"
+      validate_thinking: "{ValidateThinking}"
+      answer_thinking: "{AnswerThinking}"
+    outputs: [FormattedResult]
+    use_env: "global"
+    ctx_access: ["vars.read"]
+
+  # 9. 終了ブロック
+  - type: end
+    exec: 100
+    reason: "prompt_evolution_completed"
+    exit_code: "success"
+    final:
+      - name: result
+        value: "{FormattedResult}"
+      - name: original_input
+        value: "{input}"
+      - name: generated_prompt
+        value: "{GeneratedPrompt}"
+      - name: enhanced_prompt
+        value: "{EnhancedPrompt}"
+      - name: validation_status
+        value: "{ValidationStatus}"
+      - name: final_answer
+        value: "{FinalAnswer}"
+    final_mode: "map"
+    include_vars:
+      - retry_count
+      - is_valid
+      - final_prompt
+
+# 実行コマンド:
+# python -m sdg run --yaml examples/prompt_evolution_agent.yaml --input examples/data/prompt_evolution_input.jsonl --output output.jsonl --save-intermediate
