@@ -1,0 +1,365 @@
+# LLMベンチマーク用質問生成エージェント
+# 資料から独立して成立する質問文を生成し、LLM性能評価用のプロンプトを作成する
+
+mabel:
+  version: "2.0"
+  id: "com.example.agent.question_generator"
+  name: "LLM Benchmark Question Generator Agent"
+  description: |
+    資料を参照して質問の原型を作成し、多角化・進化・検証を経て
+    最終的にLLMベンチマーク用の質問文を生成するエージェント
+
+# モデル設定（qwen3 - 出力形式: <think>思考</think>回答）
+models:
+  - name: qwen3
+    api_model: "qwen3"
+    api_key: "sk-local"
+    base_url: http://localhost:11434/v1
+    request_defaults:
+      temperature: 0.7
+      max_tokens: 4096
+      top_p: 0.9
+
+# グローバル変数
+globals:
+  const:
+    NUM_DIVERSIFIED_QUESTIONS: 4
+    APP_NAME: "LLM Benchmark Question Generator"
+  vars:
+    original_question: ""
+    diversified_questions: []
+    evolved_questions: []
+    selected_question: ""
+    selection_reason: ""
+    all_outputs: []
+
+# 予算設定
+budgets:
+  loops:
+    max_iters: 20
+    on_exceed: "truncate"
+  recursion:
+    max_depth: 16
+    on_exceed: "error"
+  wall_time_ms: 600000
+  ai:
+    max_calls: 20
+    max_tokens: 50000
+
+blocks:
+  # ============================================================
+  # ステップ1: 資料に基づく質問の原型作成
+  # ============================================================
+  - type: ai
+    exec: 10
+    id: create_original_question
+    name: "Step 1: Create Original Question from Source"
+    model: qwen3
+    system_prompt: |
+      あなたは教育・評価用の質問を作成する専門家です。
+      与えられた資料を分析し、その内容に基づいて「質問の原型」を1つ作成してください。
+      
+      【重要なルール】
+      1. 質問は資料の内容を参考にするが、資料なしでも回答できる形式にすること
+      2. 「資料によると」「上記の文章では」などの資料参照表現は絶対に使用しないこと
+      3. 質問は一般的な知識や論理的思考で回答可能な形式にすること
+      4. 質問は具体的で明確であること
+      
+      【出力形式】
+      <think>資料の分析と質問設計の思考プロセス</think>
+      <question>生成した質問文</question>
+      <topic>質問の主題（キーワード）</topic>
+    prompts:
+      - |
+        以下の資料を参考にして、LLM評価用の質問の原型を1つ作成してください。
+        
+        【資料】
+        {text}
+        
+        注意: 生成する質問は資料を読まなくても回答できる一般的な質問形式にしてください。
+    outputs:
+      - name: OriginalQuestion
+        select: tag
+        tag: question
+      - name: QuestionTopic
+        select: tag
+        tag: topic
+      - name: Step1Thinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        original_question: OriginalQuestion
+
+  # ============================================================
+  # ステップ2: 質問文の多角化（4つの視点追加）
+  # ============================================================
+  - type: ai
+    exec: 20
+    id: diversify_questions
+    name: "Step 2: Diversify Questions (4 Perspectives)"
+    model: qwen3
+    system_prompt: |
+      あなたは多角的な視点から質問を設計する専門家です。
+      与えられた原型質問を基に、異なる角度・切り口から4つの新しい質問を作成してください。
+      
+      【多角化の視点例】
+      1. 原因・理由を問う視点（なぜ〜か？）
+      2. 方法・プロセスを問う視点（どのように〜か？）
+      3. 比較・対照の視点（〜と〜の違いは？）
+      4. 影響・結果を問う視点（〜の影響は？）
+      5. 仮定・条件を問う視点（もし〜だったら？）
+      6. 応用・実践の視点（〜を活用するには？）
+      
+      【重要なルール】
+      1. 各質問は資料なしで単独で成立すること
+      2. 「資料によると」などの参照表現は禁止
+      3. 4つの質問はそれぞれ異なる視点・切り口であること
+      4. 質問は番号付きリスト形式で出力すること
+      
+      【出力形式】
+      <think>多角化の思考プロセス</think>
+      <questions>
+      1. [視点A] 質問文1
+      2. [視点B] 質問文2
+      3. [視点C] 質問文3
+      4. [視点D] 質問文4
+      </questions>
+    prompts:
+      - |
+        以下の原型質問を基に、4つの異なる視点から質問を作成してください。
+        
+        【原型質問】
+        {OriginalQuestion}
+        
+        【主題】
+        {QuestionTopic}
+        
+        それぞれの質問は、単独で成立し、資料なしでも回答可能な形式にしてください。
+    outputs:
+      - name: DiversifiedQuestions
+        select: tag
+        tag: questions
+      - name: Step2Thinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        diversified_questions: DiversifiedQuestions
+
+  # ============================================================
+  # ステップ3: 質問文の進化（難易度調整・人間らしさ付与）
+  # ============================================================
+  - type: ai
+    exec: 30
+    id: evolve_questions
+    name: "Step 3: Evolve Questions (Difficulty & Naturalness)"
+    model: qwen3
+    system_prompt: |
+      あなたは質問の高度化と自然な表現への変換を行う専門家です。
+      与えられた4つの質問それぞれに対して、以下の進化を施してください。
+      
+      【進化のポイント】
+      1. 難易度の調整
+         - 複数の論点を含める
+         - 条件や制約を追加する
+         - 深い分析や考察を要求する
+      
+      2. 人間らしさの付与
+         - 実際の利用シナリオを想定した文脈を追加
+         - 自然な話し言葉的表現に調整
+         - 具体的な状況設定を付与
+      
+      【変換例】
+      元: 「〇〇とはどういうことですか？」
+      進化後: 「私は〇〇の分野で働いていますが、〇〇について詳しく教えてください。
+               また、実務で注意すべき点があれば、具体例を交えて説明してほしいです。」
+      
+      【重要なルール】
+      1. 各質問は資料なしで単独で成立すること
+      2. 質問が複雑になっても、回答可能な範囲に留めること
+      3. 4つすべての質問を進化させること
+      
+      【出力形式】
+      <think>進化の思考プロセス</think>
+      <evolved_questions>
+      1. [進化後の質問1]
+      
+      2. [進化後の質問2]
+      
+      3. [進化後の質問3]
+      
+      4. [進化後の質問4]
+      </evolved_questions>
+    prompts:
+      - |
+        以下の4つの質問を、難易度を上げつつ人間らしい表現に進化させてください。
+        
+        【多角化された質問】
+        {DiversifiedQuestions}
+        
+        【主題】
+        {QuestionTopic}
+        
+        各質問に具体的な状況設定や追加の要求を加え、より実践的で自然な質問に変換してください。
+    outputs:
+      - name: EvolvedQuestions
+        select: tag
+        tag: evolved_questions
+      - name: Step3Thinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        evolved_questions: EvolvedQuestions
+
+  # ============================================================
+  # ステップ4: 質問文の検証と選択
+  # ============================================================
+  - type: ai
+    exec: 40
+    id: validate_and_select
+    name: "Step 4: Validate and Select Best Question"
+    model: qwen3
+    system_prompt: |
+      あなたはLLM評価用プロンプトの品質評価専門家です。
+      与えられた4つの進化後の質問を評価し、最も優れた1つを選定してください。
+      
+      【評価基準】
+      1. 独立性: 資料なしで質問が完結しているか（資料参照表現がないか）
+      2. 自然さ: 人間が実際に使用しそうな表現か
+      3. 回答可能性: LLMが適切に回答できる形式か
+      4. 評価適性: LLMの能力を適切に評価できる質問か
+      5. 複雑性: 適度な難易度があり、単純すぎないか
+      
+      【出力形式】
+      <think>各質問の評価と選定の思考プロセス</think>
+      <evaluation>
+      【質問1の評価】
+      - 独立性: ○/△/×
+      - 自然さ: ○/△/×
+      - 回答可能性: ○/△/×
+      - 評価適性: ○/△/×
+      - 複雑性: ○/△/×
+      - 総合評価: A/B/C
+      
+      【質問2の評価】
+      ...（同様に4つすべて評価）
+      </evaluation>
+      <selected>選定した質問（そのまま記載）</selected>
+      <reason>選定理由の詳細説明</reason>
+    prompts:
+      - |
+        以下の4つの進化後の質問を評価し、LLMベンチマーク用として最も適切な1つを選定してください。
+        
+        【進化後の質問リスト】
+        {EvolvedQuestions}
+        
+        【主題】
+        {QuestionTopic}
+        
+        各質問を評価基準に従って評価し、最も優れた質問を1つ選んでください。
+    outputs:
+      - name: QuestionEvaluation
+        select: tag
+        tag: evaluation
+      - name: SelectedQuestion
+        select: tag
+        tag: selected
+      - name: SelectionReason
+        select: tag
+        tag: reason
+      - name: Step4Thinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        selected_question: SelectedQuestion
+        selection_reason: SelectionReason
+
+  # ============================================================
+  # ステップ5: 結果の整形とJSONL出力準備
+  # ============================================================
+  
+  # 結果の詳細整形（人間可読形式）
+  - type: python
+    exec: 50
+    id: format_detailed_result
+    name: "Step 5a: Format Detailed Result"
+    function: format_question_generator
+    code_path: ./examples/helpers.py
+    inputs:
+      source_text: "{text}"
+      original_question: "{OriginalQuestion}"
+      diversified_questions: "{DiversifiedQuestions}"
+      evolved_questions: "{EvolvedQuestions}"
+      selected_question: "{SelectedQuestion}"
+      selection_reason: "{SelectionReason}"
+      step1_thinking: "{Step1Thinking}"
+      step2_thinking: "{Step2Thinking}"
+      step3_thinking: "{Step3Thinking}"
+      step4_thinking: "{Step4Thinking}"
+    outputs: [FormattedResult]
+    use_env: "global"
+    ctx_access: ["vars.read", "log"]
+
+  # JSONL出力形式への整形
+  - type: python
+    exec: 51
+    id: format_jsonl_output
+    name: "Step 5b: Format JSONL Output"
+    function: format_question_output_jsonl
+    code_path: ./examples/helpers.py
+    inputs:
+      source_text: "{text}"
+      original_question: "{OriginalQuestion}"
+      diversified_questions: "{DiversifiedQuestions}"
+      evolved_questions: "{EvolvedQuestions}"
+      selected_question: "{SelectedQuestion}"
+      selection_reason: "{SelectionReason}"
+    outputs: [OutputData, FinalQuestion]
+    use_env: "global"
+    ctx_access: ["vars.read", "log"]
+
+  # ============================================================
+  # 終了ブロック
+  # ============================================================
+  - type: end
+    exec: 100
+    reason: "question_generation_completed"
+    exit_code: "success"
+    final:
+      # 主要な出力（ベンチマーク用質問）
+      - name: final_question
+        value: "{FinalQuestion}"
+      - name: original_question
+        value: "{OriginalQuestion}"
+      - name: topic
+        value: "{QuestionTopic}"
+      # 詳細データ
+      - name: diversified_questions
+        value: "{DiversifiedQuestions}"
+      - name: evolved_questions
+        value: "{EvolvedQuestions}"
+      - name: evaluation
+        value: "{QuestionEvaluation}"
+      - name: selection_reason
+        value: "{SelectionReason}"
+      # 人間可読形式の結果
+      - name: formatted_result
+        value: "{FormattedResult}"
+      # 構造化データ
+      - name: output_data
+        value: "{OutputData}"
+    final_mode: "map"
+    include_vars:
+      - original_question
+      - selected_question
+      - selection_reason
+
+# 実行コマンド例:
+# python -m sdg run \
+#   --yaml examples/question_generator_agent.yaml \
+#   --input examples/data/question_generator_input.jsonl \
+#   --output output/generated_questions.jsonl \
+#   --save-intermediate
