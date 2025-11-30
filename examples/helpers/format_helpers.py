@@ -1,4 +1,13 @@
+"""
+SDG Nexus - フォーマットヘルパー関数
+
+YAMLパイプラインから呼び出されるPythonヘルパー関数群。
+各関数はctxコンテキストと**inputsを受け取り、出力辞書を返す。
+"""
+
+
 def format_output(answer: str, flag: bool):
+    """基本的な出力フォーマット関数"""
     short = (answer or "").split("\n", 1)[0]
     return {"Formatted": f"[SHORT]\n{short}\n\n[LONG]\n{answer}\n\n[FLAG]\n{flag}"}
 
@@ -202,8 +211,6 @@ def format_question_output_jsonl(ctx, **inputs) -> dict:
     Returns:
         dict: JSONL出力用のデータ
     """
-    import json
-
     source_text = inputs.get("source_text", "")
     original_question = inputs.get("original_question", "")
     diversified_questions_raw = inputs.get("diversified_questions", "")
@@ -246,7 +253,7 @@ def format_question_output_jsonl(ctx, **inputs) -> dict:
         ),
     }
 
-    ctx.log("info", f"JSONL出力データを生成しました")
+    ctx.log("info", "JSONL出力データを生成しました")
 
     return {
         "OutputData": output_data,
@@ -532,4 +539,3 @@ def format_question_output_jsonl_v2(ctx, **inputs) -> dict:
         "ValidQuestions": valid_question_texts,
         "ValidCount": len(valid_questions),
     }
-

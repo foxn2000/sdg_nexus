@@ -64,7 +64,7 @@ blocks:
     name: format_result
     function: format_output
     inputs: [Answer, Flag]
-    code_path: examples/helpers.py
+    code_path: ./examples/helpers/format_helpers.py
     outputs: [Formatted]
 
   - type: end

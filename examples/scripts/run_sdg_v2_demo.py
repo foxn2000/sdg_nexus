@@ -6,16 +6,15 @@ SDG Nexus - MABEL v2.0 機能デモ
 Python APIから使用する方法を示します。
 
 使用方法:
-    python examples/run_sdg_v2_demo.py
+    python examples/scripts/run_sdg_v2_demo.py
 """
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 
 # プロジェクトルートをパスに追加
-project_root = Path(__file__).parent.parent
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from sdg.config import load_config, SDGConfig
@@ -27,7 +26,7 @@ async def demo_comprehensive_v2():
     """
     sdg_comprehensive_v2.yaml を使用した包括的なデモ
     """
-    examples_dir = Path(__file__).parent
+    examples_dir = Path(__file__).parent.parent
     yaml_path = examples_dir / "sdg_comprehensive_v2.yaml"
 
     print("\n" + "=" * 60)
@@ -203,7 +202,7 @@ async def demo_simple_pipeline():
     print("シンプルパイプライン デモ（LLM不要）")
     print("=" * 60)
 
-    examples_dir = Path(__file__).parent
+    examples_dir = Path(__file__).parent.parent
     yaml_path = examples_dir / "sdg_demo_v2.yaml"
 
     if not yaml_path.exists():

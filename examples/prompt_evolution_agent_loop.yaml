@@ -557,7 +557,7 @@ blocks:
     id: format_result
     name: "Format Final Result"
     function: format_prompt_evolution
-    code_path: ./examples/helpers.py
+    code_path: ./examples/helpers/format_helpers.py
     inputs:
       original_input: "{input}"
       generated_prompt: "{FinalGeneratedPrompt}"

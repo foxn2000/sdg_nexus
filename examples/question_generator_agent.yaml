@@ -287,7 +287,7 @@ blocks:
     id: format_detailed_result
     name: "Step 5a: Format Detailed Result"
     function: format_question_generator
-    code_path: ./examples/helpers.py
+    code_path: ./examples/helpers/format_helpers.py
     inputs:
       source_text: "{text}"
       original_question: "{OriginalQuestion}"
@@ -309,7 +309,7 @@ blocks:
     id: format_jsonl_output
     name: "Step 5b: Format JSONL Output"
     function: format_question_output_jsonl
-    code_path: ./examples/helpers.py
+    code_path: ./examples/helpers/format_helpers.py
     inputs:
       source_text: "{text}"
       original_question: "{OriginalQuestion}"

@@ -5,7 +5,7 @@ SDG Nexus - Python API サンプルコード
 このスクリプトはPython APIを使用してSDGパイプラインを実行する方法を示します。
 
 使用方法:
-    python examples/run_sdg_example.py
+    python examples/scripts/run_sdg_example.py
 
 環境変数:
     OPENAI_API_KEY: OpenAI APIキー（オプション、YAMLで直接指定している場合は不要）
@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 # プロジェクトルートをパスに追加
-project_root = Path(__file__).parent.parent
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from sdg.config import load_config
@@ -49,7 +49,7 @@ async def run_example():
     SDGパイプライン実行のサンプル
     """
     # 設定ファイルのパス
-    examples_dir = Path(__file__).parent
+    examples_dir = Path(__file__).parent.parent
 
     # v1.0 の例: sdg_demo.yaml
     yaml_path_v1 = examples_dir / "sdg_demo.yaml"

@@ -162,7 +162,7 @@ blocks:
     id: split_questions
     name: "Step 3: Split Questions into 4"
     function: split_diversified_questions
-    code_path: ./examples/helpers.py
+    code_path: ./examples/helpers/format_helpers.py
     inputs:
       diversified_questions: "{DiversifiedQuestions}"
     outputs: [Question1, Question2, Question3, Question4]
@@ -627,7 +627,7 @@ blocks:
     id: format_detailed_result
     name: "Step 6a: Format Detailed Result"
     function: format_question_generator_v2
-    code_path: ./examples/helpers.py
+    code_path: ./examples/helpers/format_helpers.py
     inputs:
       source_text: "{text}"
       original_question: "{OriginalQuestion}"
@@ -656,7 +656,7 @@ blocks:
     id: format_jsonl_output
     name: "Step 6b: Format JSONL Output"
     function: format_question_output_jsonl_v2
-    code_path: ./examples/helpers.py
+    code_path: ./examples/helpers/format_helpers.py
     inputs:
       source_text: "{text}"
       original_question: "{OriginalQuestion}"

@@ -298,10 +298,10 @@ blocks:
     name: "Format with External Helper"
     run_if:
       regex_match:
-        string: "helpers.py"
+        string: "format_helpers.py"
         pattern: ".+"
     function: format_comprehensive_result
-    code_path: ./examples/helpers.py
+    code_path: ./examples/helpers/format_helpers.py
     inputs:
       total: "{TotalSum}"
       fib: "{Fibonacci10}"
