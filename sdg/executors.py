@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio, importlib.util, os, re, json, sys, tempfile
-from typing import Any, Dict, List, Tuple, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple, Optional, AsyncGenerator
 from .config import (
     SDGConfig,
     AIBlock,
@@ -724,21 +725,8 @@ class PythonContext:
         print(f"[{level.upper()}] {message}", file=sys.stderr)
 
 
-async def run_pipeline(
-    cfg: SDGConfig,
-    dataset: List[Dict[str, Any]],
-    *,
-    max_batch: int = 8,
-    min_batch: int = 1,
-    target_latency_ms: int = 3000,
-    save_intermediate: bool = False,
-) -> List[Dict[str, Any]]:
-    """パイプライン実行"""
-
-    # 実行コンテキスト
-    exec_ctx = ExecutionContext(cfg)
-
-    # モデルクライアント構築
+def _build_clients(cfg: SDGConfig) -> Dict[str, LLMClient]:
+    """モデルクライアントを構築"""
     clients: Dict[str, LLMClient] = {}
     for m in cfg.models:
         # 環境変数注入
@@ -756,6 +744,363 @@ async def run_pipeline(
             headers=m.headers,
             timeout_sec=timeout,
         )
+    return clients
+
+
+async def _execute_ai_block_single(
+    block: AIBlock,
+    ctx: Dict[str, Any],
+    cfg: SDGConfig,
+    clients: Dict[str, LLMClient],
+    exec_ctx: ExecutionContext,
+) -> Dict[str, Any]:
+    """単一行のAIブロック実行"""
+    # メッセージ構築
+    msgs = []
+    if block.system_prompt:
+        msgs.append(
+            {
+                "role": "system",
+                "content": render_template(block.system_prompt, ctx),
+            }
+        )
+    user_content = "\n\n".join(
+        [render_template(p, ctx) for p in (block.prompts or [])]
+    )
+    msgs.append({"role": "user", "content": user_content})
+
+    client = clients[block.model]
+    model_def = cfg.model_by_name(block.model)
+    req_params = dict((model_def.request_defaults or {}))
+    req_params.update(block.params or {})
+
+    # v2: JSONモード
+    if block.mode == "json":
+        req_params["response_format"] = {"type": "json_object"}
+
+    # 単一チャット呼び出し
+    retry_cfg = req_params.get("retry")
+    payload = {"model": model_def.api_model, "messages": msgs, **req_params}
+    text, err, _ = await client._one_chat(payload, retry_cfg)
+
+    if err:
+        raise err
+
+    text = text or ""
+    out_map = _apply_outputs(
+        text,
+        block.outputs or [OutputDef(name="full", select="full")],
+    )
+
+    # v2: save_to
+    if block.save_to and "vars" in block.save_to:
+        for var_name, out_name in block.save_to["vars"].items():
+            if out_name in out_map:
+                exec_ctx.set_global(var_name, out_map[out_name])
+
+    return out_map
+
+
+def _load_python_function(block: PyBlock) -> Any:
+    """Pythonブロックの関数をロード"""
+    fn_name = block.entrypoint or block.function
+    if not fn_name:
+        raise ValueError("python block requires 'function' or 'entrypoint'")
+
+    if block.function_code:
+        # v2: インラインコード
+        namespace = {}
+        exec(block.function_code, namespace)
+        fn = namespace.get(fn_name)
+    elif block.code_path:
+        # v1: 外部ファイル
+        module_path = os.path.abspath(block.code_path)
+        spec = importlib.util.spec_from_file_location(
+            "sdg_user_module", module_path
+        )
+        if spec is None or spec.loader is None:
+            raise FileNotFoundError(
+                f"Cannot load python module: {module_path}"
+            )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fn = getattr(mod, fn_name, None)
+    else:
+        raise ValueError(
+            "python block requires 'code_path' or 'function_code'"
+        )
+
+    if not fn:
+        raise AttributeError(f"Function not found: {fn_name}")
+
+    return fn
+
+
+def _execute_python_block_single(
+    block: PyBlock,
+    ctx: Dict[str, Any],
+    cfg: SDGConfig,
+    exec_ctx: ExecutionContext,
+    fn: Any,
+) -> Dict[str, Any]:
+    """単一行のPythonブロック実行"""
+    # v2: ctxオブジェクト
+    py_ctx = PythonContext(exec_ctx, ctx)
+
+    # 引数準備
+    if isinstance(block.inputs, dict):
+        # v2: キーワード引数（テンプレート展開をサポート）
+        kwargs = {}
+        for k, v in block.inputs.items():
+            if isinstance(v, str):
+                # テンプレート形式の場合は展開
+                kwargs[k] = render_template(v, ctx)
+            else:
+                kwargs[k] = v
+        out = fn(py_ctx, **kwargs)
+    else:
+        # v1: 位置引数
+        args = [ctx.get(name) for name in (block.inputs or [])]
+        out = fn(py_ctx, *args) if cfg.is_v2() else fn(*args)
+
+    # 出力処理
+    if isinstance(out, dict):
+        out_map = {k: out.get(k) for k in block.outputs}
+    else:
+        out_map = {
+            name: val
+            for name, val in zip(
+                block.outputs,
+                out if isinstance(out, (list, tuple)) else [out],
+            )
+        }
+
+    return out_map
+
+
+def _execute_end_block_single(
+    block: EndBlock,
+    ctx: Dict[str, Any],
+    exec_ctx: ExecutionContext,
+) -> Dict[str, Any]:
+    """単一行のEndブロック実行"""
+    # グローバル定数と変数をコンテキストに追加
+    extended_ctx = {
+        **exec_ctx.globals_const,
+        **exec_ctx.globals_vars,
+        **ctx,
+    }
+
+    out_map = {}
+    for f in block.final or []:
+        name = f.get("name")
+        value_tmpl = f.get("value", "")
+        out_map[name] = render_template(value_tmpl, extended_ctx)
+
+    # v2: include_vars
+    if block.include_vars:
+        for var_name in block.include_vars:
+            out_map[var_name] = exec_ctx.get_global(var_name)
+
+    return out_map
+
+
+async def process_single_row(
+    row_index: int,
+    initial_context: Dict[str, Any],
+    cfg: SDGConfig,
+    clients: Dict[str, LLMClient],
+    exec_ctx: ExecutionContext,
+    *,
+    save_intermediate: bool = False,
+    python_functions: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    1つのデータ行に対して全ブロックを順次実行し、最終結果を返す。
+    
+    Args:
+        row_index: 行インデックス（デバッグ用）
+        initial_context: 初期コンテキスト（入力データの1行分）
+        cfg: SDG設定
+        clients: LLMクライアント辞書
+        exec_ctx: 実行コンテキスト（行ごとに独立したコピーを渡すこと）
+        save_intermediate: 中間結果を保存するか
+        python_functions: プリロードされたPython関数（キャッシュ用）
+    
+    Returns:
+        処理結果の辞書
+    """
+    result: Dict[str, Any] = {}
+    ctx = dict(initial_context)
+    
+    # Python関数キャッシュ
+    py_funcs = python_functions or {}
+
+    for block in cfg.blocks:
+        # run_if評価
+        run_ok = True
+        if block.run_if:
+            run_ok = _eval_cond(ctx, block.run_if, exec_ctx)
+        
+        if not run_ok:
+            continue
+
+        try:
+            if isinstance(block, AIBlock):
+                out_map = await _execute_ai_block_single(
+                    block, ctx, cfg, clients, exec_ctx
+                )
+                if save_intermediate:
+                    result.update(
+                        {f"_{block.exec}_{k}": v for k, v in out_map.items()}
+                    )
+                ctx.update(out_map)
+
+            elif isinstance(block, LogicBlock):
+                out_map = _apply_logic_block(block, ctx, exec_ctx)
+                if save_intermediate:
+                    result.update(
+                        {f"_{block.exec}_{k}": v for k, v in out_map.items()}
+                    )
+                ctx.update(out_map)
+
+            elif isinstance(block, PyBlock):
+                # 関数をキャッシュから取得またはロード
+                fn_key = f"{block.exec}_{block.function or block.entrypoint}"
+                if fn_key not in py_funcs:
+                    py_funcs[fn_key] = _load_python_function(block)
+                fn = py_funcs[fn_key]
+                
+                out_map = _execute_python_block_single(block, ctx, cfg, exec_ctx, fn)
+                if save_intermediate:
+                    result.update(
+                        {f"_{block.exec}_{k}": v for k, v in out_map.items()}
+                    )
+                ctx.update(out_map)
+
+            elif isinstance(block, EndBlock):
+                out_map = _execute_end_block_single(block, ctx, exec_ctx)
+                result.update(out_map)
+
+            else:
+                raise ValueError(f"Unknown block class: {type(block)}")
+
+        except Exception as e:
+            if block.on_error != "continue":
+                raise
+            # continue on error
+            ctx[f"error_block_{block.exec}"] = str(e)
+
+    return result
+
+
+@dataclass
+class StreamingResult:
+    """ストリーミング結果"""
+    row_index: int
+    data: Dict[str, Any]
+    error: Optional[Exception] = None
+
+
+async def run_pipeline_streaming(
+    cfg: SDGConfig,
+    dataset: List[Dict[str, Any]],
+    *,
+    max_concurrent: int = 8,
+    save_intermediate: bool = False,
+):
+    """
+    ストリーミング版パイプライン - 完了した行から順次yield
+    
+    Args:
+        cfg: SDG設定
+        dataset: 入力データセット
+        max_concurrent: 同時処理行数の上限
+        save_intermediate: 中間結果を保存するか
+    
+    Yields:
+        StreamingResult: 各行の処理結果
+    """
+    # モデルクライアント構築
+    clients = _build_clients(cfg)
+    
+    # Python関数をプリロード
+    python_functions: Dict[str, Any] = {}
+    for block in cfg.blocks:
+        if isinstance(block, PyBlock):
+            fn_key = f"{block.exec}_{block.function or block.entrypoint}"
+            python_functions[fn_key] = _load_python_function(block)
+    
+    # 同時実行数制御用セマフォ
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
+    # 結果キュー
+    result_queue: asyncio.Queue[StreamingResult] = asyncio.Queue()
+    
+    # 処理完了カウンター
+    completed = 0
+    total = len(dataset)
+    
+    async def process_row(row_index: int, row_data: Dict[str, Any]):
+        """1行を処理してキューに結果を入れる"""
+        async with semaphore:
+            # 行ごとに独立したExecutionContextを作成
+            row_exec_ctx = ExecutionContext(cfg)
+            
+            try:
+                result_data = await process_single_row(
+                    row_index=row_index,
+                    initial_context=row_data,
+                    cfg=cfg,
+                    clients=clients,
+                    exec_ctx=row_exec_ctx,
+                    save_intermediate=save_intermediate,
+                    python_functions=python_functions,
+                )
+                await result_queue.put(StreamingResult(
+                    row_index=row_index,
+                    data=result_data,
+                    error=None,
+                ))
+            except Exception as e:
+                await result_queue.put(StreamingResult(
+                    row_index=row_index,
+                    data={},
+                    error=e,
+                ))
+    
+    # 全行のタスクを起動
+    tasks = [
+        asyncio.create_task(process_row(i, row))
+        for i, row in enumerate(dataset)
+    ]
+    
+    # 完了した結果を順次yield
+    while completed < total:
+        result = await result_queue.get()
+        completed += 1
+        yield result
+    
+    # すべてのタスク完了を待機（エラー発生時の例外を伝播）
+    await asyncio.gather(*tasks)
+
+
+async def run_pipeline(
+    cfg: SDGConfig,
+    dataset: List[Dict[str, Any]],
+    *,
+    max_batch: int = 8,
+    min_batch: int = 1,
+    target_latency_ms: int = 3000,
+    save_intermediate: bool = False,
+) -> List[Dict[str, Any]]:
+    """パイプライン実行（従来のブロック単位一括処理 - 後方互換性のため維持）"""
+
+    # 実行コンテキスト
+    exec_ctx = ExecutionContext(cfg)
+
+    # モデルクライアント構築
+    clients = _build_clients(cfg)
 
     results: List[Dict[str, Any]] = [{} for _ in dataset]
     contexts: List[Dict[str, Any]] = [dict(rec) for rec in dataset]
@@ -850,71 +1195,13 @@ async def run_pipeline(
 
             elif isinstance(block, PyBlock):
                 # 関数名決定
-                fn_name = block.entrypoint or block.function
-                if not fn_name:
-                    raise ValueError("python block requires 'function' or 'entrypoint'")
-
-                # コードロード
-                if block.function_code:
-                    # v2: インラインコード
-                    namespace = {}
-                    exec(block.function_code, namespace)
-                    fn = namespace.get(fn_name)
-                elif block.code_path:
-                    # v1: 外部ファイル
-                    module_path = os.path.abspath(block.code_path)
-                    spec = importlib.util.spec_from_file_location(
-                        "sdg_user_module", module_path
-                    )
-                    if spec is None or spec.loader is None:
-                        raise FileNotFoundError(
-                            f"Cannot load python module: {module_path}"
-                        )
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
-                    fn = getattr(mod, fn_name, None)
-                else:
-                    raise ValueError(
-                        "python block requires 'code_path' or 'function_code'"
-                    )
-
-                if not fn:
-                    raise AttributeError(f"Function not found: {fn_name}")
+                fn = _load_python_function(block)
 
                 for i, (run_ok, ctx) in enumerate(zip(run_flags, contexts)):
                     if not run_ok:
                         continue
 
-                    # v2: ctxオブジェクト
-                    py_ctx = PythonContext(exec_ctx, ctx)
-
-                    # 引数準備
-                    if isinstance(block.inputs, dict):
-                        # v2: キーワード引数（テンプレート展開をサポート）
-                        kwargs = {}
-                        for k, v in block.inputs.items():
-                            if isinstance(v, str):
-                                # テンプレート形式の場合は展開
-                                kwargs[k] = render_template(v, ctx)
-                            else:
-                                kwargs[k] = v
-                        out = fn(py_ctx, **kwargs)
-                    else:
-                        # v1: 位置引数
-                        args = [ctx.get(name) for name in (block.inputs or [])]
-                        out = fn(py_ctx, *args) if cfg.is_v2() else fn(*args)
-
-                    # 出力処理
-                    if isinstance(out, dict):
-                        out_map = {k: out.get(k) for k in block.outputs}
-                    else:
-                        out_map = {
-                            name: val
-                            for name, val in zip(
-                                block.outputs,
-                                out if isinstance(out, (list, tuple)) else [out],
-                            )
-                        }
+                    out_map = _execute_python_block_single(block, ctx, cfg, exec_ctx, fn)
 
                     if save_intermediate:
                         results[i].update(
@@ -927,24 +1214,7 @@ async def run_pipeline(
                     if not run_ok:
                         continue
 
-                    # グローバル定数と変数をコンテキストに追加
-                    extended_ctx = {
-                        **exec_ctx.globals_const,
-                        **exec_ctx.globals_vars,
-                        **ctx,
-                    }
-
-                    out_map = {}
-                    for f in block.final or []:
-                        name = f.get("name")
-                        value_tmpl = f.get("value", "")
-                        out_map[name] = render_template(value_tmpl, extended_ctx)
-
-                    # v2: include_vars
-                    if block.include_vars:
-                        for var_name in block.include_vars:
-                            out_map[var_name] = exec_ctx.get_global(var_name)
-
+                    out_map = _execute_end_block_single(block, ctx, exec_ctx)
                     results[i].update(out_map)
 
             else:

@@ -206,6 +206,8 @@ for result in results:
     print(result)
 ```
 
+📖 **For detailed usage guide, see [docs/usage.md](docs/usage.md)**
+
 ## MABEL v2 Architecture
 
 ### MEX Expression Language

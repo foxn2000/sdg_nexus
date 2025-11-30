@@ -206,6 +206,8 @@ for result in results:
     print(result)
 ```
 
+📖 **詳細な使用ガイドについては [docs/usage.ja.md](docs/usage.ja.md) を参照してください**
+
 ## MABEL v2 アーキテクチャ
 
 ### MEX式言語
