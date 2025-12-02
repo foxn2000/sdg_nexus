@@ -1,30 +1,102 @@
 # SDG Nexus
 
-MABEL (Model And Blocks Expansion Language) based AI Agent System supporting **v2.0 specification**.
+## Overview
+
+**SDG-Nexus (Scalable Data Generator Nexus)** is a framework designed to efficiently generate synthetic datasets for LLMs (Large Language Models) and perform large-scale data analysis using AI agents. It is specifically designed for use cases that require parallel operation of numerous AI agents and high-speed batch processing, achieving significant improvements in processing capacity and flexibility compared to traditional methods.
+
+By adopting the latest **MABEL (Model And Blocks Expansion Language) v2.0**, it enables highly descriptive and flexible structured agent programs. Additionally, it allows simultaneous operation of different LLM models, making load balancing and performance optimization easy. This makes it highly effective for tasks such as large-scale data analysis using LLMs, data augmentation, real-time inference, and synthetic data generation.
+
+Furthermore, by incorporating adaptive batch processing and error handling mechanisms internally, stable operation is possible even in situations where request volumes fluctuate. It is particularly optimized for workloads involving high-frequency and large-scale inference, such as Natural Language Processing (NLP), generative AI applications, and AI agent-based automation systems.
+
+This framework is designed with a focus on large-scale, high-speed, and stable utilization of AI agents, making it an ideal tool for users who need to efficiently scale up advanced tasks using LLMs.
+
+---
 
 ## Features
 
-- **MABEL v2.0 Support**: Turing-complete expression language (MEX), advanced control structures (`while`, `recurse`, `reduce`, `call`, `let`), inline Python functions, and global variables
-- **MABEL v1.x Compatibility**: Full backward compatibility with automatic version detection
-- **Batch Processing**: Optimized concurrent AI API calls with adaptive batching
-- **Multi-Model Support**: Define and use multiple LLM models
-- **Flexible I/O**: JSONL and CSV support with streaming and batch modes
-- **Error Handling**: Configurable error handling with retry mechanisms
+* **MABEL v2.0 Support**
+  * Turing-complete expression language (MEX)
+  * Advanced control structures (`while`, `recurse`, `reduce`, `call`, `let`)
+  * Inline Python functions
+  * Global variable support
+* **MABEL v1.x Backward Compatibility**
+  * Automatic version detection
+* **Advanced Concurrent Processing**
+  * Automatically optimized adaptive batch processing
+* **Multi-Model Support**
+  * Define and operate multiple LLM models simultaneously
+* **Flexible I/O Support**
+  * JSONL and CSV format support in streaming and batch modes
+* **Robust Error Handling**
+  * Flexible error handling with retry mechanisms
+
+---
+
+## Requirements
+
+* Python `>= 3.10`
+* PyYAML `>= 6.0.1`
+* openai `>= 1.40.0`
+* tqdm `>= 4.66.0`
+
+---
 
 ## Installation
+
+Examples of installation using multiple environment management methods are provided.
+
+### Standard pip Installation
 
 ```bash
 pip install -e .
 ```
 
-## Requirements
+### Installation with pyenv
 
-- Python >= 3.10
-- PyYAML >= 6.0.1
-- openai >= 1.40.0
-- tqdm >= 4.66.0
+```bash
+# Python version management
+pyenv install 3.12.0
+pyenv local 3.12.0
+
+# Set up venv
+python -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -e .
+```
+
+### Installation with conda
+
+```bash
+# Create and activate environment
+conda create -n sdg python=3.12
+conda activate sdg
+
+# Install
+pip install -e .
+```
+
+### Fast Installation with uv (Recommended)
+
+[uv](https://github.com/astral-sh/uv) is a fast Python package manager.
+
+```bash
+# Install uv (if not already installed)
+pip install uv
+
+# Create virtual environment and install dependencies
+uv venv
+source .venv/bin/activate
+
+uv pip install -e .
+```
+
+---
 
 ## Quick Start
+
+Minimal configuration example:
 
 ```yaml
 mabel:
@@ -52,22 +124,28 @@ blocks:
         value: "{Summary}"
 ```
 
-For detailed MABEL syntax and advanced features, see:
-- **[MABEL v2 Quick Reference (English)](docs/mabel/mabel_v2_en.md)** - Quick reference guide for v2.0 features
-- **[MABEL v2 Complete Specification (日本語)](docs/mabel/mabel_v2.md)** - Complete specification with all features, examples, and implementation status
+For detailed specifications, please refer to:
+
+* **[MABEL v2 Specification](docs/mabel/mabel_v2.md)** - Detailed feature descriptions, samples, and specifications
+
+---
 
 ## Usage
 
-### Command Line
+### Command Line (CLI) Execution
+
+Basic JSONL processing:
 
 ```bash
-# Process JSONL input
 sdg run \
   --yaml examples/sdg_demo_v2.yaml \
   --input examples/data/input.jsonl \
   --output output/result.jsonl
+```
 
-# With custom batch settings
+Execution with custom batch settings:
+
+```bash
 sdg run \
   --yaml examples/sdg_demo_v2.yaml \
   --input data.jsonl \
@@ -77,7 +155,7 @@ sdg run \
   --target-latency 2000
 ```
 
-### Python API
+### Using Python API
 
 ```python
 from sdg.config import load_config
@@ -93,38 +171,56 @@ dataset = [
     {"UserInput": "Explain machine learning"}
 ]
 
-# Run pipeline
+# Run pipeline asynchronously
 results = asyncio.run(run_pipeline(cfg, dataset))
 
 for result in results:
     print(result)
 ```
 
-📖 **Documentation:**
-- **[Usage Guide](docs/usage.md)** - How to run SDG pipelines (CLI and Python API)
-- **[MABEL v2 Quick Reference (English)](docs/mabel/mabel_v2_en.md)** - Quick reference for MABEL v2.0
-- **[MABEL v2 Complete Specification (日本語)](docs/mabel/mabel_v2.md)** - Complete specification with all features and examples
+---
+
+## Detailed Documentation 📖
+
+* **[Usage Guide](docs/usage.md)** - Detailed usage of CLI and Python API
+* **[MABEL v2 Complete Specification](docs/mabel/mabel_v2.md)** - MABEL grammar and feature details
+
+---
 
 ## Examples
 
-See `examples/` directory for sample YAML files and data:
-- `sdg_demo.yaml` / `sdg_demo_v2.yaml` - Basic and advanced examples
-- `sdg_comprehensive_v2.yaml` - Comprehensive v2.0 example with all features
-- `helpers.py` - External Python functions example
-- `data/` - Sample input/output data files
+Sample code and data are provided in the following directory.
 
-## License
+* **`examples/`**
+  * `sdg_demo.yaml` : Basic usage example
+  * `sdg_demo_v2.yaml` : Advanced MABEL v2 sample
+  * `sdg_comprehensive_v2.yaml` : Comprehensive v2 feature sample
+  * `helpers.py` : External Python function usage example
+  * `data/` : Sample input/output datasets
 
-MIT License - see LICENSE file
+---
 
-## Contributing
+## License 📝
 
-Contributions welcome! Please ensure:
-- v1 compatibility is maintained
-- v2 features follow MABEL 2.0 specification
-- Tests pass for both v1 and v2 examples
-- Code is well-documented
+This project is provided under the **MIT License**.
+See the [LICENSE](LICENSE) file for details.
 
-## Support
+---
 
-For issues and feature requests, please use the GitHub issue tracker.
+## Contributing 🤝
+
+Contributions to SDG-Nexus are welcome!
+When submitting pull requests, please ensure:
+
+* MABEL v1 compatibility is maintained
+* MABEL v2 features comply with the latest specifications
+* All existing samples pass tests
+* Appropriate documentation is provided
+
+---
+
+## Support 🛠️
+
+For bug reports and feature requests, please use [GitHub Issues](https://github.com/your-repository/issues).
+
+---
