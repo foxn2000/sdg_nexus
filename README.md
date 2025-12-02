@@ -126,7 +126,7 @@ blocks:
 
 For detailed specifications, please refer to:
 
-* **[MABEL v2 Specification](docs/mabel/mabel_v2.md)** - Detailed feature descriptions, samples, and specifications
+* **[MABEL v2 Specification](docs/mabel/mabel_v2_en.md)** - Detailed feature descriptions, samples, and specifications
 
 ---
 
@@ -183,7 +183,17 @@ for result in results:
 ## Detailed Documentation 📖
 
 * **[Usage Guide](docs/usage.md)** - Detailed usage of CLI and Python API
-* **[MABEL v2 Complete Specification](docs/mabel/mabel_v2.md)** - MABEL grammar and feature details
+* **[MABEL v2 Complete Specification](docs/mabel/mabel_v2_en.md)** - MABEL grammar and feature details
+
+---
+
+## MABEL Editor 🎨
+
+For visual editing of MABEL files, we provide a dedicated GUI tool:
+
+* **[SDG UI](https://github.com/foxn2000/sdg_ui)** - A graphical user interface for creating and editing MABEL configuration files
+
+This tool provides an intuitive way to design and manage MABEL pipelines without manually editing YAML files.
 
 ---
 
