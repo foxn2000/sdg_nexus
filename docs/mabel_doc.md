@@ -1,7 +1,7 @@
-# MABEL 記法 v2 ― 実装準拠ドキュメント（完全版）
+# MABEL 記法 v2.1 ― 実装準拠ドキュメント（完全版）
 
 **対象実装**: `/sdg_nexus/sdg` ディレクトリ配下（`config.py / executors.py / llm_client.py / utils.py / mex.py / runner.py / cli.py`）
-**準拠バージョン**: `mabel.version: "2.0"`（`mabel_v2.md` の章立て 1〜10 に沿って網羅）
+**準拠バージョン**: `mabel.version: "2.0"` または `"2.1"`（v2.1 で画像入力サポートを追加）
 
 > 本書は、同梱のバックエンド実装が読み込む YAML スキーマと実行モデルを、**コードで確認できるフィールド名／振る舞い**に基づいて、**読めばそのまま MABEL の YAML が書ける**形でまとめたものです。
 > 以降、各節末の「実装ポイント」では、対応するクラスやフィールド（例: `AIBlock.model`, `LogicBlock.op` など）を明示して、**仕様⇄実装**の対応関係を確定させます。
@@ -73,6 +73,15 @@ files:                       # 任意: 同梱ファイル（テキスト/バイ�
   - name: "terms.txt"
     mime: "text/plain"
     content: "..."
+
+images:                      # v2.1: 画像定義（§4.5）
+  - name: "logo"
+    path: "./assets/logo.png"           # ローカルファイル
+  - name: "reference"
+    url: "https://example.com/ref.png"  # URL
+  - name: "inline_img"
+    base64: "iVBORw0KGgoAAAANSUhEUg..."  # Base64埋め込み
+    media_type: "image/png"
 
 blocks: []                  # 実行ブロック（§6）
 
@@ -166,7 +175,110 @@ models:
     request_defaults:
       temperature: 0.3
       max_tokens: 400
+
+  # v2.1: Vision対応モデル
+  - name: vision_model
+    api_model: "gpt-4o"
+    api_key: "${ENV.OPENAI_API_KEY}"
+    capabilities: ["vision"]  # Vision対応を明示
 ```
+
+---
+
+## 4.5 画像定義（`images`）— v2.1
+
+v2.1 では画像入力をサポートします。`images` セクションで静的画像を定義し、プロンプト内で `{name.img}` 記法で参照できます。
+
+### 画像定義フォーマット
+
+| フィールド    |  必須 | 型       | 説明                                    |
+| ------------ | :--: | -------- | --------------------------------------- |
+| `name`       |  ✓   | `string` | 画像の識別名（プロンプトで `{name.img}` として参照） |
+| `path`       |      | `string` | ローカルファイルパス                      |
+| `url`        |      | `string` | 画像URL（HTTPSを推奨）                   |
+| `base64`     |      | `string` | Base64エンコードされた画像データ          |
+| `media_type` |      | `string` | MIMEタイプ（既定: `image/png`）          |
+
+**注**: `path`、`url`、`base64` のいずれか1つを指定します。
+
+### 静的画像定義の例
+
+```yaml
+images:
+  # ローカルファイル
+  - name: logo
+    path: ./assets/logo.png
+  
+  # URL参照
+  - name: reference_image
+    url: https://example.com/images/reference.png
+  
+  # Base64埋め込み
+  - name: small_icon
+    base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    media_type: "image/png"
+```
+
+### 入力データでの画像指定
+
+JSOLNの入力データで画像を指定する場合、`_type: "image"` を持つオブジェクトを使用します：
+
+```jsonl
+{"UserInput": "画像を分析してください", "ProductImage": {"_type": "image", "path": "./images/product_001.png"}}
+{"UserInput": "この画像は何ですか", "ProductImage": {"_type": "image", "url": "https://example.com/img.png"}}
+{"UserInput": "分析してください", "ProductImage": {"_type": "image", "base64": "iVBORw0K...", "media_type": "image/png"}}
+```
+
+### プロンプト内での画像参照（`{name.img}` 記法）
+
+プロンプト内で画像を埋め込むには `{name.img}` 記法を使用します：
+
+| 記法                      | 説明                                   |
+| ------------------------- | -------------------------------------- |
+| `{name.img}`              | 画像を埋め込み                          |
+| `{name.img:detail=low}`   | 低解像度モード（トークン節約）           |
+| `{name.img:detail=high}`  | 高解像度モード（詳細分析）               |
+| `{name.img:detail=auto}`  | 自動選択（既定）                        |
+
+### 画像入力の使用例
+
+```yaml
+mabel:
+  version: "2.1"
+
+images:
+  - name: category_guide
+    path: ./assets/category_guide.png
+
+models:
+  - name: vision
+    api_model: "gpt-4o"
+    api_key: "${ENV.OPENAI_API_KEY}"
+    capabilities: ["vision"]
+
+blocks:
+  - type: ai
+    exec: 1
+    model: vision
+    prompts:
+      - |
+        商品画像を分析してください。
+        
+        商品画像:
+        {ProductImage.img:detail=high}
+        
+        カテゴリ参照:
+        {category_guide.img:detail=low}
+    outputs:
+      - name: Analysis
+        select: full
+```
+
+**実装ポイント**
+
+* 画像解決の優先順位: 1) 入力データ（コンテキスト）、2) `images` セクション
+* OpenAI Vision API形式（`image_url` タイプ）でメッセージを構築
+* サポートフォーマット: PNG, JPEG, GIF, WebP
 
 ---
 

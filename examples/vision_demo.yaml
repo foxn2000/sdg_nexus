@@ -1,0 +1,131 @@
+mabel:
+  version: "2.1"
+  id: "com.example.vision_demo"
+  name: "Vision Demo"
+  description: "Demonstrates image input capabilities with {name.img} placeholder"
+
+# 静的画像定義（YAMLに埋め込み）
+images:
+  - name: sample_logo
+    url: "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"
+  # ローカルファイルの例（コメントアウト）
+  # - name: local_image
+  #   path: ./assets/sample.png
+  # Base64埋め込みの例（コメントアウト）
+  # - name: inline_image
+  #   base64: "iVBORw0KGgoAAAANSUhEUg..."
+  #   media_type: "image/png"
+
+# グローバル変数
+globals:
+  const:
+    APP_NAME: "Vision Demo v2.1"
+  vars:
+    analysis_count: 0
+
+# 予算設定
+budgets:
+  loops:
+    max_iters: 100
+    on_exceed: "error"
+  ai:
+    max_calls: 10
+    max_tokens: 10000
+
+# Vision対応モデル
+models:
+  - name: vision
+    api_model: "gpt-4o-mini"  # Vision対応モデル
+    api_key: "${ENV.OPENAI_API_KEY}"
+    base_url: "https://api.openai.com/v1"
+    capabilities: ["vision"]  # Vision対応を明示
+    request_defaults:
+      temperature: 0.2
+      max_tokens: 1000
+
+blocks:
+  # 画像分析
+  - type: ai
+    exec: 1
+    id: analyze_image
+    model: vision
+    system_prompt: |
+      You are an image analysis expert.
+      Analyze images carefully and provide detailed descriptions.
+      App: {APP_NAME}
+    prompts:
+      - |
+        Please analyze the following image and describe what you see.
+        
+        User's request: {UserInput}
+        
+        Image to analyze:
+        {ProductImage.img:detail=high}
+        
+        Provide your analysis in the following format:
+        - Description: [brief description]
+        - Key elements: [list of main elements]
+        - Colors: [dominant colors]
+        - Mood/Style: [overall impression]
+    outputs:
+      - name: ImageAnalysis
+        select: full
+    save_to:
+      vars:
+        last_analysis: ImageAnalysis
+
+  # カウンター更新
+  - type: logic
+    exec: 2
+    id: update_counter
+    op: set
+    var: analysis_count
+    value: {"add": [{"var": "analysis_count"}, 1]}
+    outputs:
+      - name: AnalysisCount
+        from: value
+
+  # 結果フォーマット
+  - type: python
+    exec: 3
+    id: format_result
+    entrypoint: format_analysis
+    function_code: |
+      def format_analysis(ctx, analysis: str) -> dict:
+          """分析結果をフォーマット"""
+          lines = analysis.strip().split('\n')
+          
+          result = {
+              "app_name": ctx.vars.get("APP_NAME", "Unknown"),
+              "analysis_count": ctx.vars.get("analysis_count", 0),
+              "formatted_analysis": f"=== Image Analysis Result ===\n{analysis}\n{'=' * 30}"
+          }
+          
+          ctx.log("info", f"Analysis #{result['analysis_count']} completed")
+          
+          return {"FormattedResult": result}
+    inputs:
+      analysis: "{ImageAnalysis}"
+    outputs: [FormattedResult]
+    use_env: "global"
+
+  # 最終出力
+  - type: end
+    exec: 100
+    reason: "analysis_completed"
+    exit_code: "success"
+    final:
+      - name: result
+        value: "{FormattedResult}"
+      - name: raw_analysis
+        value: "{ImageAnalysis}"
+    include_vars:
+      - analysis_count
+      - last_analysis
+
+# 接続定義（明示的な配線）
+connections:
+  - from: analyze_image
+    output: ImageAnalysis
+    to: format_result
+    input: analysis

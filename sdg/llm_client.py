@@ -12,6 +12,7 @@ class LLMError(RuntimeError):
 
 class BatchOptimizer:
     """Simple adaptive concurrency controller based on latency and error rate."""
+
     def __init__(self, min_batch=1, max_batch=8, target_latency_ms=3000):
         self.min_batch = min_batch
         self.max_batch = max_batch
@@ -100,8 +101,18 @@ class LLMClient:
                 if not is_retryable and status is None:
                     name = e.__class__.__name__.lower()
                     msg = str(e).lower()
-                    if any(s in name for s in ["timeout", "rate", "connection", "server"]) or any(
-                        s in msg for s in ["timeout", "rate limit", "temporarily", "retry", "connection", "server error"]
+                    if any(
+                        s in name for s in ["timeout", "rate", "connection", "server"]
+                    ) or any(
+                        s in msg
+                        for s in [
+                            "timeout",
+                            "rate limit",
+                            "temporarily",
+                            "retry",
+                            "connection",
+                            "server error",
+                        ]
                     ):
                         is_retryable = True
 
@@ -118,11 +129,17 @@ class LLMClient:
         self,
         *,
         model: str,
-        messages_list: List[List[Dict[str, str]]],
+        messages_list: List[
+            List[Dict[str, Any]]
+        ],  # content can be string or list (multimodal)
         request_params: Dict[str, Any],
         batch_size: int,
     ) -> Tuple[List[Optional[str]], List[int], int]:
         """Run many chats concurrently with bounded concurrency = batch_size.
+
+        Supports multimodal messages where content is a list of text/image parts:
+        [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "..."}}]
+
         Returns (results, latencies_ms_per_task, error_count)
         """
         limit = asyncio.Semaphore(batch_size)
@@ -132,7 +149,7 @@ class LLMClient:
         results: List[Optional[str]] = [None] * len(messages_list)
         errors = 0
 
-        async def runner(idx: int, msgs: List[Dict[str, str]]):
+        async def runner(idx: int, msgs: List[Dict[str, Any]]):
             nonlocal errors
             async with limit:
                 retry_cfg = (request_params or {}).get("retry")

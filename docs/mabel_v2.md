@@ -1,7 +1,7 @@
-# MABEL 2.0 完全仕様（Model And Blocks Expansion Language）
+# MABEL 2.1 完全仕様（Model And Blocks Expansion Language）
 **— 新版：フルスタック仕様（v1系の機能も含めた全記述）—**
 
-発行日: 2025-11-05
+発行日: 2025-12-02（v2.1: 画像入力サポート追加）
 
 ---
 
@@ -90,6 +90,15 @@ files:            # 任意：組み込みテキスト/バイナリ（base64等�
     mime: "text/plain"
     content: "..."
 
+images:           # v2.1: 画像定義（§4.5）
+  - name: "logo"
+    path: "./assets/logo.png"
+  - name: "reference"
+    url: "https://example.com/ref.png"
+  - name: "inline_img"
+    base64: "..."
+    media_type: "image/png"
+
 blocks: []        # 実行ブロック群（§6）
 
 connections: []   # 明示配線（任意、§8）
@@ -153,6 +162,70 @@ connections: []   # 明示配線（任意、§8）
 | `safety` |  | `object` | セーフティポリシー |
 
 **推奨**: セキュアな運用のため `api_key` は環境変数注入を用いる。
+
+---
+
+## 4.5 画像定義（`images`）— v2.1
+
+v2.1 では画像入力をサポート。`images` セクションで静的画像を定義し、プロンプト内で `{name.img}` 記法で参照。
+
+### 画像定義フォーマット
+
+| フィールド    |  必須 | 型       | 説明                                    |
+| ------------ | :--: | -------- | --------------------------------------- |
+| `name`       |  ✓   | `string` | 画像の識別名                             |
+| `path`       |      | `string` | ローカルファイルパス                      |
+| `url`        |      | `string` | 画像URL                                 |
+| `base64`     |      | `string` | Base64エンコードデータ                   |
+| `media_type` |      | `string` | MIMEタイプ（既定: `image/png`）          |
+
+### 入力データでの画像指定
+
+```jsonl
+{"UserInput": "分析してください", "ProductImage": {"_type": "image", "path": "./images/product.png"}}
+{"UserInput": "これは何？", "ProductImage": {"_type": "image", "url": "https://example.com/img.png"}}
+```
+
+### プロンプト内での画像参照
+
+| 記法                      | 説明                        |
+| ------------------------- | --------------------------- |
+| `{name.img}`              | 画像を埋め込み               |
+| `{name.img:detail=low}`   | 低解像度モード               |
+| `{name.img:detail=high}`  | 高解像度モード               |
+| `{name.img:detail=auto}`  | 自動選択（既定）             |
+
+### 使用例
+
+```yaml
+mabel:
+  version: "2.1"
+
+images:
+  - name: guide
+    path: ./assets/guide.png
+
+models:
+  - name: vision
+    api_model: "gpt-4o"
+    api_key: "${ENV.OPENAI_API_KEY}"
+    capabilities: ["vision"]
+
+blocks:
+  - type: ai
+    exec: 1
+    model: vision
+    prompts:
+      - |
+        画像を分析してください:
+        {ProductImage.img:detail=high}
+        
+        参考画像:
+        {guide.img:detail=low}
+    outputs:
+      - name: Analysis
+        select: full
+```
 
 ---
 

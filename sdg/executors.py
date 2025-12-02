@@ -12,7 +12,17 @@ from .config import (
     BudgetConfig,
 )
 from .llm_client import LLMClient, BatchOptimizer
-from .utils import render_template, extract_by_regex, extract_by_tag, ensure_json_obj
+from .utils import (
+    render_template,
+    extract_by_regex,
+    extract_by_tag,
+    ensure_json_obj,
+    has_image_placeholders,
+    extract_image_placeholders,
+    resolve_image_to_data_uri,
+    is_image_data,
+    load_image_as_base64,
+)
 from .mex import eval_mex, MEXEvaluator
 
 
@@ -747,12 +757,120 @@ def _build_clients(cfg: SDGConfig) -> Dict[str, LLMClient]:
     return clients
 
 
+def _build_multimodal_content(
+    text: str,
+    ctx: Dict[str, Any],
+    cfg: SDGConfig,
+    base_path: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    テキストと画像を含むマルチモーダルコンテンツを構築
+
+    Args:
+        text: プロンプトテキスト（{name.img}プレースホルダーを含む可能性あり）
+        ctx: コンテキスト辞書
+        cfg: SDG設定
+        base_path: 画像パス解決用のベースディレクトリ
+
+    Returns:
+        OpenAI Vision API形式のcontentリスト
+    """
+    # 画像プレースホルダーがなければシンプルなテキストを返す
+    if not has_image_placeholders(text):
+        return [{"type": "text", "text": text}]
+
+    content_parts: List[Dict[str, Any]] = []
+    last_end = 0
+
+    for img_name, options, start, end in extract_image_placeholders(text):
+        # 画像の前のテキスト部分を追加
+        if start > last_end:
+            text_part = text[last_end:start]
+            if text_part.strip():
+                content_parts.append({"type": "text", "text": text_part})
+
+        # 画像を解決
+        img_url = None
+        detail = options.get("detail", "auto")
+
+        # 1. 入力データから検索
+        img_data = ctx.get(img_name)
+        if img_data and is_image_data(img_data):
+            try:
+                img_url = resolve_image_to_data_uri(img_data, base_path)
+            except Exception as e:
+                # 画像解決に失敗した場合はスキップ
+                print(
+                    f"Warning: Failed to resolve image '{img_name}' from context: {e}",
+                    file=sys.stderr,
+                )
+
+        # 2. imagesセクションから検索
+        if img_url is None:
+            img_def = cfg.image_by_name(img_name)
+            if img_def:
+                try:
+                    if img_def.base64:
+                        img_url = f"data:{img_def.media_type};base64,{img_def.base64}"
+                    elif img_def.url:
+                        img_url = img_def.url
+                    elif img_def.path:
+                        path = img_def.path
+                        if base_path and not os.path.isabs(path):
+                            path = os.path.join(base_path, path)
+                        b64, media_type = load_image_as_base64(path)
+                        img_url = f"data:{media_type};base64,{b64}"
+                except Exception as e:
+                    print(
+                        f"Warning: Failed to resolve image '{img_name}' from images section: {e}",
+                        file=sys.stderr,
+                    )
+
+        # 画像が見つかった場合のみ追加
+        if img_url:
+            content_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": img_url,
+                        "detail": detail,
+                    },
+                }
+            )
+
+        last_end = end
+
+    # 残りのテキストを追加
+    if last_end < len(text):
+        remaining = text[last_end:]
+        if remaining.strip():
+            content_parts.append({"type": "text", "text": remaining})
+
+    # contentが空の場合はエラー回避のためテキストのみ返す
+    if not content_parts:
+        return [{"type": "text", "text": text}]
+
+    return content_parts
+
+
+def _has_images_in_prompts(
+    prompts: List[str], ctx: Dict[str, Any], cfg: SDGConfig
+) -> bool:
+    """プロンプトに画像が含まれているかチェック"""
+    for p in prompts:
+        rendered = render_template(p, ctx)
+        if has_image_placeholders(rendered):
+            return True
+    return False
+
+
 async def _execute_ai_block_single(
     block: AIBlock,
     ctx: Dict[str, Any],
     cfg: SDGConfig,
     clients: Dict[str, LLMClient],
     exec_ctx: ExecutionContext,
+    base_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """単一行のAIブロック実行"""
     # メッセージ構築
@@ -764,10 +882,20 @@ async def _execute_ai_block_single(
                 "content": render_template(block.system_prompt, ctx),
             }
         )
-    user_content = "\n\n".join(
+
+    # プロンプト内に画像があるかチェック
+    raw_user_content = "\n\n".join(
         [render_template(p, ctx) for p in (block.prompts or [])]
     )
-    msgs.append({"role": "user", "content": user_content})
+
+    # 画像プレースホルダーがある場合はマルチモーダルコンテンツを構築
+    if has_image_placeholders(raw_user_content):
+        multimodal_content = _build_multimodal_content(
+            raw_user_content, ctx, cfg, base_path
+        )
+        msgs.append({"role": "user", "content": multimodal_content})
+    else:
+        msgs.append({"role": "user", "content": raw_user_content})
 
     client = clients[block.model]
     model_def = cfg.model_by_name(block.model)
@@ -815,20 +943,14 @@ def _load_python_function(block: PyBlock) -> Any:
     elif block.code_path:
         # v1: 外部ファイル
         module_path = os.path.abspath(block.code_path)
-        spec = importlib.util.spec_from_file_location(
-            "sdg_user_module", module_path
-        )
+        spec = importlib.util.spec_from_file_location("sdg_user_module", module_path)
         if spec is None or spec.loader is None:
-            raise FileNotFoundError(
-                f"Cannot load python module: {module_path}"
-            )
+            raise FileNotFoundError(f"Cannot load python module: {module_path}")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         fn = getattr(mod, fn_name, None)
     else:
-        raise ValueError(
-            "python block requires 'code_path' or 'function_code'"
-        )
+        raise ValueError("python block requires 'code_path' or 'function_code'")
 
     if not fn:
         raise AttributeError(f"Function not found: {fn_name}")
@@ -917,7 +1039,7 @@ async def process_single_row(
 ) -> Dict[str, Any]:
     """
     1つのデータ行に対して全ブロックを順次実行し、最終結果を返す。
-    
+
     Args:
         row_index: 行インデックス（デバッグ用）
         initial_context: 初期コンテキスト（入力データの1行分）
@@ -926,13 +1048,13 @@ async def process_single_row(
         exec_ctx: 実行コンテキスト（行ごとに独立したコピーを渡すこと）
         save_intermediate: 中間結果を保存するか
         python_functions: プリロードされたPython関数（キャッシュ用）
-    
+
     Returns:
         処理結果の辞書
     """
     result: Dict[str, Any] = {}
     ctx = dict(initial_context)
-    
+
     # Python関数キャッシュ
     py_funcs = python_functions or {}
 
@@ -941,7 +1063,7 @@ async def process_single_row(
         run_ok = True
         if block.run_if:
             run_ok = _eval_cond(ctx, block.run_if, exec_ctx)
-        
+
         if not run_ok:
             continue
 
@@ -951,17 +1073,13 @@ async def process_single_row(
                     block, ctx, cfg, clients, exec_ctx
                 )
                 if save_intermediate:
-                    result.update(
-                        {f"_{block.exec}_{k}": v for k, v in out_map.items()}
-                    )
+                    result.update({f"_{block.exec}_{k}": v for k, v in out_map.items()})
                 ctx.update(out_map)
 
             elif isinstance(block, LogicBlock):
                 out_map = _apply_logic_block(block, ctx, exec_ctx)
                 if save_intermediate:
-                    result.update(
-                        {f"_{block.exec}_{k}": v for k, v in out_map.items()}
-                    )
+                    result.update({f"_{block.exec}_{k}": v for k, v in out_map.items()})
                 ctx.update(out_map)
 
             elif isinstance(block, PyBlock):
@@ -970,12 +1088,10 @@ async def process_single_row(
                 if fn_key not in py_funcs:
                     py_funcs[fn_key] = _load_python_function(block)
                 fn = py_funcs[fn_key]
-                
+
                 out_map = _execute_python_block_single(block, ctx, cfg, exec_ctx, fn)
                 if save_intermediate:
-                    result.update(
-                        {f"_{block.exec}_{k}": v for k, v in out_map.items()}
-                    )
+                    result.update({f"_{block.exec}_{k}": v for k, v in out_map.items()})
                 ctx.update(out_map)
 
             elif isinstance(block, EndBlock):
@@ -997,6 +1113,7 @@ async def process_single_row(
 @dataclass
 class StreamingResult:
     """ストリーミング結果"""
+
     row_index: int
     data: Dict[str, Any]
     error: Optional[Exception] = None
@@ -1011,42 +1128,42 @@ async def run_pipeline_streaming(
 ):
     """
     ストリーミング版パイプライン - 完了した行から順次yield
-    
+
     Args:
         cfg: SDG設定
         dataset: 入力データセット
         max_concurrent: 同時処理行数の上限
         save_intermediate: 中間結果を保存するか
-    
+
     Yields:
         StreamingResult: 各行の処理結果
     """
     # モデルクライアント構築
     clients = _build_clients(cfg)
-    
+
     # Python関数をプリロード
     python_functions: Dict[str, Any] = {}
     for block in cfg.blocks:
         if isinstance(block, PyBlock):
             fn_key = f"{block.exec}_{block.function or block.entrypoint}"
             python_functions[fn_key] = _load_python_function(block)
-    
+
     # 同時実行数制御用セマフォ
     semaphore = asyncio.Semaphore(max_concurrent)
-    
+
     # 結果キュー
     result_queue: asyncio.Queue[StreamingResult] = asyncio.Queue()
-    
+
     # 処理完了カウンター
     completed = 0
     total = len(dataset)
-    
+
     async def process_row(row_index: int, row_data: Dict[str, Any]):
         """1行を処理してキューに結果を入れる"""
         async with semaphore:
             # 行ごとに独立したExecutionContextを作成
             row_exec_ctx = ExecutionContext(cfg)
-            
+
             try:
                 result_data = await process_single_row(
                     row_index=row_index,
@@ -1057,30 +1174,31 @@ async def run_pipeline_streaming(
                     save_intermediate=save_intermediate,
                     python_functions=python_functions,
                 )
-                await result_queue.put(StreamingResult(
-                    row_index=row_index,
-                    data=result_data,
-                    error=None,
-                ))
+                await result_queue.put(
+                    StreamingResult(
+                        row_index=row_index,
+                        data=result_data,
+                        error=None,
+                    )
+                )
             except Exception as e:
-                await result_queue.put(StreamingResult(
-                    row_index=row_index,
-                    data={},
-                    error=e,
-                ))
-    
+                await result_queue.put(
+                    StreamingResult(
+                        row_index=row_index,
+                        data={},
+                        error=e,
+                    )
+                )
+
     # 全行のタスクを起動
-    tasks = [
-        asyncio.create_task(process_row(i, row))
-        for i, row in enumerate(dataset)
-    ]
-    
+    tasks = [asyncio.create_task(process_row(i, row)) for i, row in enumerate(dataset)]
+
     # 完了した結果を順次yield
     while completed < total:
         result = await result_queue.get()
         completed += 1
         yield result
-    
+
     # すべてのタスク完了を待機（エラー発生時の例外を伝播）
     await asyncio.gather(*tasks)
 
@@ -1134,10 +1252,21 @@ async def run_pipeline(
                                 "content": render_template(block.system_prompt, ctx),
                             }
                         )
-                    user_content = "\n\n".join(
+
+                    # プロンプト内に画像があるかチェック
+                    raw_user_content = "\n\n".join(
                         [render_template(p, ctx) for p in (block.prompts or [])]
                     )
-                    msgs.append({"role": "user", "content": user_content})
+
+                    # 画像プレースホルダーがある場合はマルチモーダルコンテンツを構築
+                    if has_image_placeholders(raw_user_content):
+                        multimodal_content = _build_multimodal_content(
+                            raw_user_content, ctx, cfg, None
+                        )
+                        msgs.append({"role": "user", "content": multimodal_content})
+                    else:
+                        msgs.append({"role": "user", "content": raw_user_content})
+
                     messages_list.append(msgs)
                     rec_indices.append(i)
 
@@ -1201,7 +1330,9 @@ async def run_pipeline(
                     if not run_ok:
                         continue
 
-                    out_map = _execute_python_block_single(block, ctx, cfg, exec_ctx, fn)
+                    out_map = _execute_python_block_single(
+                        block, ctx, cfg, exec_ctx, fn
+                    )
 
                     if save_intermediate:
                         results[i].update(
