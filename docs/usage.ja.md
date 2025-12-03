@@ -7,8 +7,9 @@
 1. [概要](#概要)
 2. [CLIからの使用方法](#cliからの使用方法)
 3. [Python APIからの使用方法](#python-apiからの使用方法)
-4. [パーサーについて](#パーサーについて)
-5. [入出力データ形式](#入出力データ形式)
+4. [高度な最適化機能](#高度な最適化機能)
+5. [パーサーについて](#パーサーについて)
+6. [入出力データ形式](#入出力データ形式)
 
 ---
 
@@ -232,6 +233,245 @@ for m in cfg.models:
 for b in cfg.blocks:
     print(f"exec={b.exec}, type={b.type}, name={b.name or '(unnamed)'}")
 ```
+
+---
+
+## 高度な最適化機能
+
+SDG Nexusは、高スループットのLLM推論ワークロードのための高度な最適化機能を提供します。これらの機能は、vLLMやSGLangバックエンドを使用する際に特に有効です。
+
+### 適応型並行制御
+
+[`AdaptiveController`](../sdg/adaptive/controller.py:28)は、AIMD（加法増加乗法減少）アルゴリズムを使用して、観測されたレイテンシとバックエンドメトリクスに基づいて並行レベルを自動調整します。
+
+**主な機能:**
+- レイテンシが低い場合は並行度を自動的に増加
+- エラー発生やレイテンシの急上昇時には並行度を素早く減少
+- バックエンドのキュー深度とキャッシュ使用率を監視（vLLM/SGLang）
+- 目標レイテンシ境界を維持
+
+**基本的な使用方法:**
+
+```python
+from sdg.adaptive.controller import AdaptiveController
+
+controller = AdaptiveController(
+    min_concurrency=1,
+    max_concurrency=64,
+    target_latency_ms=2000.0,  # 目標P95レイテンシ
+    target_queue_depth=32,
+)
+
+# 現在の並行度制限を取得
+limit = controller.current_concurrency
+
+# 完了したリクエストを記録
+controller.record_latency(latency_ms=150.0, is_error=False)
+
+# 統計情報を取得
+stats = controller.get_stats()
+print(f"現在の並行度: {stats['current_concurrency']}")
+print(f"P95レイテンシ: {stats['p95_latency_ms']}ms")
+```
+
+**詳細設定:**
+
+```python
+controller = AdaptiveController(
+    min_concurrency=1,
+    max_concurrency=128,
+    target_latency_ms=2000.0,
+    target_queue_depth=32,
+    # AIMDパラメータ
+    increase_step=2,              # サイクルごとの加法増加量
+    decrease_factor=0.5,          # 乗法減少係数（50%）
+    # 感度
+    latency_tolerance=1.5,        # レイテンシが目標の1.5倍を超えたら減少
+    error_rate_threshold=0.05,    # エラー率が5%を超えたら減少
+    # タイミング
+    adjustment_interval_ms=1000,  # 1秒ごとに調整
+    window_size=50,               # 直近50サンプルを追跡
+)
+```
+
+### メトリクス収集
+
+[`MetricsCollector`](../sdg/adaptive/metrics.py:75)は、バックエンドのメトリクスエンドポイントをポーリングして、キュー深度、キャッシュ使用率、スループットに関するリアルタイム情報を収集します。
+
+**サポートされているバックエンド:**
+- **vLLM**: `/metrics`エンドポイントのPrometheusメトリクス
+- **SGLang**: `/metrics`エンドポイントのPrometheusメトリクス
+
+**基本的な使用方法:**
+
+```python
+from sdg.adaptive.metrics import MetricsCollector, MetricsType
+
+collector = MetricsCollector(
+    base_url="http://localhost:8000",
+    metrics_type=MetricsType.VLLM,
+    poll_interval_ms=500,
+)
+
+await collector.start()
+
+# 最新のメトリクスを取得
+metrics = collector.get_latest()
+if metrics and metrics.is_valid:
+    print(f"キュー深度: {metrics.queue_depth}")
+    print(f"キャッシュ使用率: {metrics.cache_usage_percent}%")
+    print(f"実行中のリクエスト: {metrics.num_requests_running}")
+
+await collector.stop()
+```
+
+**利用可能なメトリクス:**
+
+| メトリクス | 説明 | vLLM | SGLang |
+|--------|-------------|------|--------|
+| `num_requests_waiting` | キュー内のリクエスト数 | ✓ | ✓ |
+| `num_requests_running` | 現在処理中のリクエスト数 | ✓ | ✓ |
+| `queue_depth` | 総キュー深度（待機中+実行中） | ✓ | ✓ |
+| `cache_usage_percent` | KVキャッシュ使用率 | ✓ | ✓ |
+| `prompt_tokens_total` | 総入力トークン数 | ✓ | ✓ |
+| `generation_tokens_total` | 総出力トークン数 | ✓ | ✓ |
+
+### リクエストバッチング
+
+[`RequestBatcher`](../sdg/adaptive/batcher.py:38)は、連続的バッチングの利点を最大化するため、複数のリクエストをまとめて送信します。
+
+**主な機能:**
+- キュー状態に基づく動的バッチサイジング
+- レイテンシ境界を保証する最大待機時間
+- トークン認識型バッチング（オプション）
+- 優先度キューサポート
+
+**基本的な使用方法:**
+
+```python
+from sdg.adaptive.batcher import RequestBatcher
+
+async def batch_processor(payloads):
+    # バッチ処理ロジック
+    results = await client.batch_chat(payloads)
+    return results
+
+batcher = RequestBatcher(
+    batch_processor=batch_processor,
+    max_batch_size=64,
+    max_wait_ms=50,
+)
+
+async with batcher:
+    # リクエストを送信
+    result = await batcher.submit({
+        "messages": [{"role": "user", "content": "こんにちは"}]
+    })
+```
+
+**詳細設定:**
+
+```python
+batcher = RequestBatcher(
+    batch_processor=batch_processor,
+    max_batch_size=64,
+    max_wait_ms=50,
+    max_tokens_per_batch=8192,  # 総トークン数を制限
+    token_estimator=custom_estimator,  # カスタムトークンカウンター
+    enabled=True,
+)
+
+# 統計情報を取得
+stats = batcher.get_stats()
+print(f"平均バッチサイズ: {stats['avg_batch_size']}")
+print(f"保留中のリクエスト: {stats['pending_count']}")
+```
+
+### 統合最適化
+
+[`AdaptiveConcurrencyManager`](../sdg/adaptive/controller.py:293)は、すべての最適化機能を組み合わせて、ターンキーの高性能推論を実現します。
+
+**完全な例:**
+
+```python
+from sdg.adaptive.controller import AdaptiveConcurrencyManager
+from sdg.adaptive.metrics import MetricsType
+
+async def main():
+    manager = AdaptiveConcurrencyManager(
+        base_url="http://localhost:8000",
+        metrics_type=MetricsType.VLLM,
+        min_concurrency=1,
+        max_concurrency=64,
+        target_latency_ms=2000.0,
+        target_queue_depth=32,
+        enabled=True,
+    )
+    
+    async with manager:
+        # 自動並行制御でリクエストを実行
+        async with manager.acquire():
+            start = time.time()
+            result = await execute_request()
+            latency = (time.time() - start) * 1000
+            manager.record_latency(latency)
+        
+        # 統計情報を監視
+        stats = manager.get_stats()
+        print(f"現在の並行度: {stats['current_concurrency']}")
+        print(f"バックエンドキュー: {stats.get('backend_queue_depth', 'N/A')}")
+
+asyncio.run(main())
+```
+
+**CLI統合:**
+
+バッチモード使用時、最適化機能は自動的に有効化されます:
+
+```bash
+# vLLMバックエンドでの適応型並行制御
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --batch-mode \
+  --max-batch 64 \
+  --min-batch 1 \
+  --target-latency 2000
+```
+
+### マルチバックエンドサポート
+
+複数のバックエンドインスタンスによる負荷分散デプロイメントの場合:
+
+```python
+from sdg.adaptive.metrics import MultiBackendMetricsCollector, MetricsType
+
+collector = MultiBackendMetricsCollector(
+    backends={
+        "http://backend1:8000": MetricsType.VLLM,
+        "http://backend2:8000": MetricsType.VLLM,
+        "http://backend3:8000": MetricsType.VLLM,
+    },
+    poll_interval_ms=500,
+)
+
+await collector.start()
+
+# 全バックエンドの集約メトリクスを取得
+metrics = collector.get_aggregated_metrics()
+print(f"総キュー深度: {collector.get_total_queue_depth()}")
+
+await collector.stop()
+```
+
+### ベストプラクティス
+
+1. **保守的に開始**: 低い並行度制限から開始し、コントローラーに自動増加させる
+2. **メトリクスの監視**: [`get_stats()`](../sdg/adaptive/controller.py:422)を使用してパフォーマンスを追跡
+3. **ワークロードに合わせて調整**: 要件に基づいて`target_latency_ms`を調整
+4. **バックエンドメトリクス**: より良い最適化のためvLLM/SGLangのメトリクス収集を有効化
+5. **バッチング**: 予測可能なリクエストパターンを持つワークロードにはリクエストバッチングを使用
 
 ---
 

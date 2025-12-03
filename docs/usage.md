@@ -7,8 +7,9 @@ This document explains how to run SDG pipelines using existing YAML files (MABEL
 1. [Overview](#overview)
 2. [CLI Usage](#cli-usage)
 3. [Python API Usage](#python-api-usage)
-4. [Parsers](#parsers)
-5. [Input/Output Data Formats](#inputoutput-data-formats)
+4. [Advanced Optimization](#advanced-optimization)
+5. [Parsers](#parsers)
+6. [Input/Output Data Formats](#inputoutput-data-formats)
 
 ---
 
@@ -232,6 +233,245 @@ for m in cfg.models:
 for b in cfg.blocks:
     print(f"exec={b.exec}, type={b.type}, name={b.name or '(unnamed)'}")
 ```
+
+---
+
+## Advanced Optimization
+
+SDG Nexus provides advanced optimization features for high-throughput LLM inference workloads. These features are particularly useful when working with vLLM or SGLang backends.
+
+### Adaptive Concurrency Control
+
+The [`AdaptiveController`](../sdg/adaptive/controller.py:28) automatically adjusts concurrency levels based on observed latencies and backend metrics using an AIMD (Additive Increase Multiplicative Decrease) algorithm.
+
+**Key Features:**
+- Automatically increases concurrency when latencies are low
+- Quickly decreases concurrency when errors occur or latencies spike
+- Monitors backend queue depth and cache usage (vLLM/SGLang)
+- Maintains target latency bounds
+
+**Basic Usage:**
+
+```python
+from sdg.adaptive.controller import AdaptiveController
+
+controller = AdaptiveController(
+    min_concurrency=1,
+    max_concurrency=64,
+    target_latency_ms=2000.0,  # Target P95 latency
+    target_queue_depth=32,
+)
+
+# Get current concurrency limit
+limit = controller.current_concurrency
+
+# Record completed request
+controller.record_latency(latency_ms=150.0, is_error=False)
+
+# Get statistics
+stats = controller.get_stats()
+print(f"Current concurrency: {stats['current_concurrency']}")
+print(f"P95 latency: {stats['p95_latency_ms']}ms")
+```
+
+**Advanced Configuration:**
+
+```python
+controller = AdaptiveController(
+    min_concurrency=1,
+    max_concurrency=128,
+    target_latency_ms=2000.0,
+    target_queue_depth=32,
+    # AIMD parameters
+    increase_step=2,              # Additive increase per cycle
+    decrease_factor=0.5,          # Multiplicative decrease (50%)
+    # Sensitivity
+    latency_tolerance=1.5,        # Decrease if latency > target * 1.5
+    error_rate_threshold=0.05,    # Decrease if error rate > 5%
+    # Timing
+    adjustment_interval_ms=1000,  # Adjust every 1 second
+    window_size=50,               # Track last 50 samples
+)
+```
+
+### Metrics Collection
+
+The [`MetricsCollector`](../sdg/adaptive/metrics.py:75) polls backend metrics endpoints to gather real-time information about queue depth, cache usage, and throughput.
+
+**Supported Backends:**
+- **vLLM**: Prometheus metrics at `/metrics` endpoint
+- **SGLang**: Prometheus metrics at `/metrics` endpoint
+
+**Basic Usage:**
+
+```python
+from sdg.adaptive.metrics import MetricsCollector, MetricsType
+
+collector = MetricsCollector(
+    base_url="http://localhost:8000",
+    metrics_type=MetricsType.VLLM,
+    poll_interval_ms=500,
+)
+
+await collector.start()
+
+# Get latest metrics
+metrics = collector.get_latest()
+if metrics and metrics.is_valid:
+    print(f"Queue depth: {metrics.queue_depth}")
+    print(f"Cache usage: {metrics.cache_usage_percent}%")
+    print(f"Running requests: {metrics.num_requests_running}")
+
+await collector.stop()
+```
+
+**Available Metrics:**
+
+| Metric | Description | vLLM | SGLang |
+|--------|-------------|------|--------|
+| `num_requests_waiting` | Requests in queue | ✓ | ✓ |
+| `num_requests_running` | Currently processing | ✓ | ✓ |
+| `queue_depth` | Total queue depth (waiting + running) | ✓ | ✓ |
+| `cache_usage_percent` | KV cache utilization | ✓ | ✓ |
+| `prompt_tokens_total` | Total input tokens | ✓ | ✓ |
+| `generation_tokens_total` | Total output tokens | ✓ | ✓ |
+
+### Request Batching
+
+The [`RequestBatcher`](../sdg/adaptive/batcher.py:38) groups multiple requests together before submission to maximize continuous batching benefits.
+
+**Key Features:**
+- Dynamic batch sizing based on queue state
+- Maximum wait time to ensure latency bounds
+- Token-aware batching (optional)
+- Priority queue support
+
+**Basic Usage:**
+
+```python
+from sdg.adaptive.batcher import RequestBatcher
+
+async def batch_processor(payloads):
+    # Your batch processing logic
+    results = await client.batch_chat(payloads)
+    return results
+
+batcher = RequestBatcher(
+    batch_processor=batch_processor,
+    max_batch_size=64,
+    max_wait_ms=50,
+)
+
+async with batcher:
+    # Submit requests
+    result = await batcher.submit({
+        "messages": [{"role": "user", "content": "Hello"}]
+    })
+```
+
+**Advanced Configuration:**
+
+```python
+batcher = RequestBatcher(
+    batch_processor=batch_processor,
+    max_batch_size=64,
+    max_wait_ms=50,
+    max_tokens_per_batch=8192,  # Limit total tokens
+    token_estimator=custom_estimator,  # Custom token counter
+    enabled=True,
+)
+
+# Get statistics
+stats = batcher.get_stats()
+print(f"Average batch size: {stats['avg_batch_size']}")
+print(f"Pending requests: {stats['pending_count']}")
+```
+
+### Integrated Optimization
+
+The [`AdaptiveConcurrencyManager`](../sdg/adaptive/controller.py:293) combines all optimization features for turnkey high-performance inference.
+
+**Full Example:**
+
+```python
+from sdg.adaptive.controller import AdaptiveConcurrencyManager
+from sdg.adaptive.metrics import MetricsType
+
+async def main():
+    manager = AdaptiveConcurrencyManager(
+        base_url="http://localhost:8000",
+        metrics_type=MetricsType.VLLM,
+        min_concurrency=1,
+        max_concurrency=64,
+        target_latency_ms=2000.0,
+        target_queue_depth=32,
+        enabled=True,
+    )
+    
+    async with manager:
+        # Execute requests with automatic concurrency control
+        async with manager.acquire():
+            start = time.time()
+            result = await execute_request()
+            latency = (time.time() - start) * 1000
+            manager.record_latency(latency)
+        
+        # Monitor statistics
+        stats = manager.get_stats()
+        print(f"Current concurrency: {stats['current_concurrency']}")
+        print(f"Backend queue: {stats.get('backend_queue_depth', 'N/A')}")
+
+asyncio.run(main())
+```
+
+**CLI Integration:**
+
+The optimization features are automatically enabled when using batch mode:
+
+```bash
+# Adaptive concurrency with vLLM backend
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --batch-mode \
+  --max-batch 64 \
+  --min-batch 1 \
+  --target-latency 2000
+```
+
+### Multi-Backend Support
+
+For load-balanced deployments with multiple backend instances:
+
+```python
+from sdg.adaptive.metrics import MultiBackendMetricsCollector, MetricsType
+
+collector = MultiBackendMetricsCollector(
+    backends={
+        "http://backend1:8000": MetricsType.VLLM,
+        "http://backend2:8000": MetricsType.VLLM,
+        "http://backend3:8000": MetricsType.VLLM,
+    },
+    poll_interval_ms=500,
+)
+
+await collector.start()
+
+# Get aggregated metrics across all backends
+metrics = collector.get_aggregated_metrics()
+print(f"Total queue depth: {collector.get_total_queue_depth()}")
+
+await collector.stop()
+```
+
+### Best Practices
+
+1. **Start Conservative**: Begin with lower concurrency limits and let the controller increase it automatically
+2. **Monitor Metrics**: Use [`get_stats()`](../sdg/adaptive/controller.py:422) to track performance
+3. **Tune for Your Workload**: Adjust `target_latency_ms` based on your requirements
+4. **Backend Metrics**: Enable metrics collection for vLLM/SGLang for better optimization
+5. **Batching**: Use request batching for workloads with predictable request patterns
 
 ---
 

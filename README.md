@@ -24,7 +24,10 @@ This framework is designed with a focus on large-scale, high-speed, and stable u
 * **MABEL v1.x Backward Compatibility**
   * Automatic version detection
 * **Advanced Concurrent Processing**
-  * Automatically optimized adaptive batch processing
+  * Adaptive concurrency control with AIMD (Additive Increase Multiplicative Decrease) algorithm
+  * Real-time metrics collection from vLLM/SGLang backends
+  * Dynamic request batching for optimal throughput
+  * Automatic latency-based optimization
 * **Multi-Model Support**
   * Define and operate multiple LLM models simultaneously
 * **Flexible I/O Support**
