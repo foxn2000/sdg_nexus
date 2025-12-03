@@ -1,5 +1,7 @@
 # SDG Nexus
 
+<img width="1024" height="1024" alt="85e322d3-e585-48dd-aee3-bfded051564a" src="https://github.com/user-attachments/assets/7d1b2045-e81b-406f-9f0b-15a16dc7ef24" />
+
 ## Overview
 
 **SDG-Nexus (Scalable Data Generator Nexus)** is a framework designed to efficiently generate synthetic datasets for LLMs (Large Language Models) and perform large-scale data analysis using AI agents. It is specifically designed for use cases that require parallel operation of numerous AI agents and high-speed batch processing, achieving significant improvements in processing capacity and flexibility compared to traditional methods.
