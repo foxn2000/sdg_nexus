@@ -1,5 +1,10 @@
 from .core import ExecutionContext, BudgetExceeded, StreamingResult
-from .pipeline import run_pipeline, run_pipeline_streaming, process_single_row
+from .pipeline import (
+    run_pipeline,
+    run_pipeline_streaming,
+    run_pipeline_streaming_adaptive,
+    process_single_row,
+)
 
 __all__ = [
     "ExecutionContext",
@@ -7,5 +12,6 @@ __all__ = [
     "StreamingResult",
     "run_pipeline",
     "run_pipeline_streaming",
+    "run_pipeline_streaming_adaptive",
     "process_single_row",
 ]

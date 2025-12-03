@@ -1,7 +1,7 @@
 from __future__ import annotations
 import argparse
 import sys
-from .runner import run, run_streaming
+from .runner import run, run_streaming, run_streaming_adaptive
 
 
 # 日本語ヘルプメッセージ
@@ -23,7 +23,7 @@ SDG (Scalable Data Generator) CLI
   sdg --yaml <file> --input <file> --output <file> [オプション]
 """
 
-RUN_HELP_JA = """使い方: sdg run --yaml YAML --input INPUT --output OUTPUT [--save-intermediate] [--max-concurrent MAX_CONCURRENT] [--no-progress] [--batch-mode] [--max-batch MAX_BATCH] [--min-batch MIN_BATCH] [--target-latency-ms TARGET_LATENCY_MS]
+RUN_HELP_JA = """使い方: sdg run --yaml YAML --input INPUT --output OUTPUT [--save-intermediate] [--max-concurrent MAX_CONCURRENT] [--no-progress] [--batch-mode] [--max-batch MAX_BATCH] [--min-batch MIN_BATCH] [--target-latency-ms TARGET_LATENCY_MS] [--adaptive-concurrency] [--use-vllm-metrics] [--use-sglang-metrics]
 
 YAMLブループリントを入力データセットに対して実行
 
@@ -42,16 +42,31 @@ YAMLブループリントを入力データセットに対して実行
                           並行処理する最大行数 (ストリーミングモード、デフォルト: 8)
   --no-progress           プログレス表示を無効化 (ストリーミングモード)
 
+適応的並行性制御オプション（ストリーミングモード）:
+  --adaptive-concurrency  適応的並行性制御を有効化（レイテンシに応じて動的に調整）
+  --use-vllm-metrics      vLLMのメトリクスを使用して並行性を最適化
+  --use-sglang-metrics    SGLangのメトリクスを使用して並行性を最適化
+  --min-concurrent MIN_CONCURRENT
+                          最小並行処理数（適応的制御時、デフォルト: 1）
+  --target-queue-depth TARGET_QUEUE_DEPTH
+                          目標バックエンドキュー深度（デフォルト: 32）
+
 バッチモードオプション（ブロック単位の処理）:
   --batch-mode            バッチモードを使用（ストリーミングの代わりにブロック単位で処理）
   --max-batch MAX_BATCH   ブロックあたりの最大並行リクエスト数 (バッチモードのみ、デフォルト: 8)
   --min-batch MIN_BATCH   ブロックあたりの最小並行リクエスト数 (バッチモードのみ、デフォルト: 1)
   --target-latency-ms TARGET_LATENCY_MS
-                          リクエストあたりの目標平均レイテンシ (バッチモードのみ、デフォルト: 3000)
+                          リクエストあたりの目標平均レイテンシ (デフォルト: 3000)
 
 例:
   # ストリーミングモード（デフォルト）
   sdg run --yaml config.yaml --input data.jsonl --output result.jsonl
+
+  # 適応的並行性制御を有効化
+  sdg run --yaml config.yaml --input data.jsonl --output result.jsonl --adaptive-concurrency
+
+  # vLLMメトリクスを使用した適応的並行性制御
+  sdg run --yaml config.yaml --input data.jsonl --output result.jsonl --adaptive-concurrency --use-vllm-metrics
 
   # バッチモード
   sdg run --yaml config.yaml --input data.jsonl --output result.jsonl --batch-mode
@@ -61,7 +76,7 @@ YAMLブループリントを入力データセットに対して実行
 """
 
 # Legacy mode help message in Japanese
-LEGACY_HELP_JA = """使い方: sdg --yaml YAML --input INPUT --output OUTPUT [--save-intermediate] [--max-concurrent MAX_CONCURRENT] [--no-progress] [--batch-mode] [--max-batch MAX_BATCH] [--min-batch MIN_BATCH] [--target-latency-ms TARGET_LATENCY_MS]
+LEGACY_HELP_JA = """使い方: sdg --yaml YAML --input INPUT --output OUTPUT [--save-intermediate] [--max-concurrent MAX_CONCURRENT] [--no-progress] [--batch-mode] [--max-batch MAX_BATCH] [--min-batch MIN_BATCH] [--target-latency-ms TARGET_LATENCY_MS] [--adaptive-concurrency] [--use-vllm-metrics] [--use-sglang-metrics]
 
 SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
 
@@ -75,13 +90,21 @@ SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
   --max-concurrent MAX_CONCURRENT
                         並行処理する最大行数 (ストリーミングモード、デフォルト: 8)
   --no-progress         プログレス表示を無効化 (ストリーミングモード)
+  --adaptive-concurrency
+                        適応的並行性制御を有効化
+  --use-vllm-metrics    vLLMのメトリクスを使用
+  --use-sglang-metrics  SGLangのメトリクスを使用
+  --min-concurrent MIN_CONCURRENT
+                        最小並行処理数（適応的制御時、デフォルト: 1）
+  --target-queue-depth TARGET_QUEUE_DEPTH
+                        目標バックエンドキュー深度（デフォルト: 32）
   --batch-mode          バッチモードを使用（ストリーミングの代わりにブロック単位で処理）
   --max-batch MAX_BATCH
                         ブロックあたりの最大並行リクエスト数 (バッチモードのみ、デフォルト: 8)
   --min-batch MIN_BATCH
                         ブロックあたりの最小並行リクエスト数 (バッチモードのみ、デフォルト: 1)
   --target-latency-ms TARGET_LATENCY_MS
-                        リクエストあたりの目標平均レイテンシ (バッチモードのみ、デフォルト: 3000)
+                        リクエストあたりの目標平均レイテンシ (デフォルト: 3000)
 """
 
 
@@ -109,6 +132,35 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Disable progress display (streaming mode)",
     )
 
+    # Adaptive concurrency options (streaming mode)
+    p.add_argument(
+        "--adaptive-concurrency",
+        action="store_true",
+        help="Enable adaptive concurrency control (adjusts dynamically based on latency)",
+    )
+    p.add_argument(
+        "--use-vllm-metrics",
+        action="store_true",
+        help="Use vLLM metrics for adaptive concurrency optimization",
+    )
+    p.add_argument(
+        "--use-sglang-metrics",
+        action="store_true",
+        help="Use SGLang metrics for adaptive concurrency optimization",
+    )
+    p.add_argument(
+        "--min-concurrent",
+        type=int,
+        default=1,
+        help="Min concurrent rows (adaptive mode, default: 1)",
+    )
+    p.add_argument(
+        "--target-queue-depth",
+        type=int,
+        default=32,
+        help="Target backend queue depth (adaptive mode, default: 32)",
+    )
+
     # Batch mode options (block-by-block processing)
     p.add_argument(
         "--batch-mode",
@@ -131,7 +183,7 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--target-latency-ms",
         type=int,
         default=3000,
-        help="Target average latency per request (batch mode only)",
+        help="Target average latency per request",
     )
 
     # Legacy option (hidden, for backward compatibility)
@@ -157,6 +209,34 @@ def _execute_run(args):
             min_batch=args.min_batch,
             target_latency_ms=args.target_latency_ms,
             save_intermediate=args.save_intermediate,
+        )
+    elif args.adaptive_concurrency:
+        # Adaptive streaming mode: dynamic concurrency control
+        # Support legacy --max-concurrent-rows option
+        max_concurrent = (
+            args.max_concurrent_rows
+            if args.max_concurrent_rows is not None
+            else args.max_concurrent
+        )
+
+        # Determine metrics type
+        metrics_type = "none"
+        if args.use_vllm_metrics:
+            metrics_type = "vllm"
+        elif args.use_sglang_metrics:
+            metrics_type = "sglang"
+
+        run_streaming_adaptive(
+            args.yaml,
+            args.input,
+            args.output,
+            max_concurrent=max_concurrent,
+            min_concurrent=args.min_concurrent,
+            target_latency_ms=args.target_latency_ms,
+            target_queue_depth=args.target_queue_depth,
+            metrics_type=metrics_type,
+            save_intermediate=args.save_intermediate,
+            show_progress=not args.no_progress,
         )
     else:
         # Streaming mode: row-by-row processing (default)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import time
 from typing import Any, Dict, List, Optional
 
 from ..config import (
@@ -23,6 +24,14 @@ from .core import (
 from .logic import _apply_logic_block
 from .python import _load_python_function, _execute_python_block_single
 from .ai import _execute_ai_block_single, _build_clients, _build_multimodal_content
+
+# Import adaptive components (optional dependency)
+try:
+    from ..adaptive import AdaptiveController, MetricsCollector, MetricsType
+
+    ADAPTIVE_AVAILABLE = True
+except ImportError:
+    ADAPTIVE_AVAILABLE = False
 
 
 async def process_single_row(
@@ -190,6 +199,187 @@ async def run_pipeline_streaming(
 
     # すべてのタスク完了を待機（エラー発生時の例外を伝播）
     await asyncio.gather(*tasks)
+
+
+async def run_pipeline_streaming_adaptive(
+    cfg: SDGConfig,
+    dataset: List[Dict[str, Any]],
+    *,
+    max_concurrent: int = 64,
+    min_concurrent: int = 1,
+    target_latency_ms: int = 3000,
+    target_queue_depth: int = 32,
+    metrics_type: str = "none",
+    save_intermediate: bool = False,
+):
+    """
+    適応的並行性制御付きストリーミング版パイプライン
+
+    レイテンシとオプションのバックエンドメトリクス（vLLM/SGLang）に基づいて、
+    並行処理数を動的に調整しながら処理を行う。
+
+    Args:
+        cfg: SDG設定
+        dataset: 入力データセット
+        max_concurrent: 同時処理行数の上限 (デフォルト: 64)
+        min_concurrent: 同時処理行数の下限 (デフォルト: 1)
+        target_latency_ms: 目標P95レイテンシ (ミリ秒、デフォルト: 3000)
+        target_queue_depth: 目標バックエンドキュー深度 (デフォルト: 32)
+        metrics_type: メトリクスタイプ ("none", "vllm", "sglang")
+        save_intermediate: 中間結果を保存するか
+
+    Yields:
+        StreamingResult: 各行の処理結果
+    """
+    if not ADAPTIVE_AVAILABLE:
+        # Fall back to standard streaming if adaptive module not available
+        async for result in run_pipeline_streaming(
+            cfg,
+            dataset,
+            max_concurrent=max_concurrent,
+            save_intermediate=save_intermediate,
+        ):
+            yield result
+        return
+
+    # モデルクライアント構築
+    clients = _build_clients(cfg)
+
+    # Python関数をプリロード
+    python_functions: Dict[str, Any] = {}
+    for block in cfg.blocks:
+        if isinstance(block, PyBlock):
+            fn_key = f"{block.exec}_{block.function or block.entrypoint}"
+            python_functions[fn_key] = _load_python_function(block)
+
+    # AdaptiveController設定
+    controller = AdaptiveController(
+        min_concurrency=min_concurrent,
+        max_concurrency=max_concurrent,
+        target_latency_ms=float(target_latency_ms),
+        target_queue_depth=target_queue_depth,
+    )
+
+    # MetricsCollector設定（メトリクスタイプに応じて）
+    metrics_collector: Optional[MetricsCollector] = None
+    if metrics_type != "none":
+        # モデル設定から最初のbase_urlを取得
+        base_url = None
+        for model in cfg.models:
+            if model.base_url:
+                base_url = model.base_url
+                break
+
+        if base_url:
+            if metrics_type == "vllm":
+                metrics_collector = MetricsCollector(
+                    base_url=base_url,
+                    metrics_type=MetricsType.VLLM,
+                )
+            elif metrics_type == "sglang":
+                metrics_collector = MetricsCollector(
+                    base_url=base_url,
+                    metrics_type=MetricsType.SGLANG,
+                )
+
+    # 結果キュー
+    result_queue: asyncio.Queue[StreamingResult] = asyncio.Queue()
+
+    # 処理完了カウンター
+    completed = 0
+    total = len(dataset)
+
+    # メトリクス更新タスク
+    metrics_update_task: Optional[asyncio.Task] = None
+
+    async def update_metrics_loop():
+        """バックエンドメトリクスを定期的にコントローラーに反映"""
+        if metrics_collector is None:
+            return
+
+        await metrics_collector.start()
+        try:
+            while True:
+                await asyncio.sleep(0.5)
+                metrics = metrics_collector.get_latest()
+                if metrics and metrics.is_valid:
+                    controller.update_with_metrics(metrics)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await metrics_collector.stop()
+
+    async def process_row(row_index: int, row_data: Dict[str, Any]):
+        """1行を処理してキューに結果を入れる（適応的並行性制御付き）"""
+        # 動的セマフォで制御
+        async with controller.semaphore:
+            start_time = time.time()
+
+            # 行ごとに独立したExecutionContextを作成
+            row_exec_ctx = ExecutionContext(cfg)
+
+            try:
+                result_data = await process_single_row(
+                    row_index=row_index,
+                    initial_context=row_data,
+                    cfg=cfg,
+                    clients=clients,
+                    exec_ctx=row_exec_ctx,
+                    save_intermediate=save_intermediate,
+                    python_functions=python_functions,
+                )
+
+                # レイテンシを記録
+                latency_ms = (time.time() - start_time) * 1000
+                controller.record_latency(latency_ms, is_error=False)
+
+                await result_queue.put(
+                    StreamingResult(
+                        row_index=row_index,
+                        data=result_data,
+                        error=None,
+                    )
+                )
+            except Exception as e:
+                # エラーもレイテンシとして記録
+                latency_ms = (time.time() - start_time) * 1000
+                controller.record_latency(latency_ms, is_error=True)
+
+                await result_queue.put(
+                    StreamingResult(
+                        row_index=row_index,
+                        data={},
+                        error=e,
+                    )
+                )
+
+    try:
+        # メトリクス収集を開始（有効な場合）
+        if metrics_collector is not None:
+            metrics_update_task = asyncio.create_task(update_metrics_loop())
+
+        # 全行のタスクを起動
+        tasks = [
+            asyncio.create_task(process_row(i, row)) for i, row in enumerate(dataset)
+        ]
+
+        # 完了した結果を順次yield
+        while completed < total:
+            result = await result_queue.get()
+            completed += 1
+            yield result
+
+        # すべてのタスク完了を待機
+        await asyncio.gather(*tasks)
+
+    finally:
+        # メトリクス収集を停止
+        if metrics_update_task is not None:
+            metrics_update_task.cancel()
+            try:
+                await metrics_update_task
+            except asyncio.CancelledError:
+                pass
 
 
 async def run_pipeline(
