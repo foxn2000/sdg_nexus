@@ -39,17 +39,17 @@ sdg run --yaml examples/sdg_demo.yaml --input examples/data/input.jsonl --output
 
 ### Execution Modes
 
-SDG has two execution modes:
+SDG has two execution modes for streaming data processing:
 
-#### 1. Streaming Mode (Default)
+#### 1. Streaming Mode with Fixed Concurrency (Default)
 
-Processes each data row in parallel and writes to the output file as soon as each row completes.
+Processes each data row in parallel with a fixed concurrency level and writes to the output file as soon as each row completes.
 
 ```bash
 # Streaming mode (default)
 sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl
 
-# Specify concurrency
+# Specify fixed concurrency
 sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --max-concurrent 16
 
 # Disable progress display
@@ -59,36 +59,62 @@ sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --no-progr
 **Options:**
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--max-concurrent` | 8 | Maximum number of concurrent rows |
+| `--max-concurrent` | 8 | Maximum number of concurrent rows (fixed) |
 | `--no-progress` | false | Disable progress display |
 
 **Features:**
+- Fixed concurrency level throughout execution
 - Intermediate results are less likely to be lost (real-time writing)
 - Memory efficient
 - Output order is completion order (may differ from input order)
 
 > **Note:** If you need the original order, sort by the `_row_index` field in the output.
 
-#### 2. Batch Mode
+#### 2. Streaming Mode with Adaptive Concurrency
 
-Processes data in blocks. Enable with the `--batch-mode` flag.
+Dynamically adjusts concurrency based on observed latencies and optional backend metrics. Enable with the `--adaptive` flag.
 
 ```bash
-# Enable batch mode
-sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --batch-mode
-
-# Specify batch sizes
+# Enable adaptive concurrency control
 sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
-  --batch-mode --max-batch 16 --min-batch 2 --target-latency-ms 5000
+  --adaptive --min-batch 1 --max-batch 32 --target-latency-ms 2000
+
+# With vLLM backend metrics
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
+  --adaptive --use-vllm-metrics --min-batch 1 --max-batch 64
+
+# With request batching for higher throughput
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
+  --adaptive --use-vllm-metrics --enable-request-batching
 ```
 
 **Options:**
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--batch-mode` | false | Enable batch mode |
-| `--max-batch` | 8 | Maximum concurrent requests per block |
-| `--min-batch` | 1 | Minimum concurrent requests per block |
-| `--target-latency-ms` | 3000 | Target average latency (milliseconds) |
+| `--adaptive` | false | Enable adaptive concurrency control |
+| `--min-batch` | 1 | Minimum concurrency level |
+| `--max-batch` | 64 | Maximum concurrency level |
+| `--target-latency-ms` | 3000 | Target P95 latency (milliseconds) |
+| `--target-queue-depth` | 32 | Target backend queue depth |
+| `--use-vllm-metrics` | false | Use vLLM Prometheus metrics |
+| `--use-sglang-metrics` | false | Use SGLang Prometheus metrics |
+| `--enable-request-batching` | false | Enable request batching |
+| `--max-batch-size` | 32 | Max requests per batch |
+| `--max-wait-ms` | 50 | Max wait time for batch formation (ms) |
+
+**Features:**
+- Automatically adjusts concurrency between `--min-batch` and `--max-batch`
+- Increases concurrency when latencies are low
+- Decreases concurrency when errors occur or latencies spike
+- Monitors backend metrics (vLLM/SGLang) for better optimization
+- Optional request batching for maximum throughput
+
+**How It Works:**
+The adaptive controller uses an AIMD (Additive Increase Multiplicative Decrease) algorithm:
+- **Increase**: Gradually adds +2 to concurrency when P95 latency < target × 0.7
+- **Decrease**: Quickly reduces by 50% when latency > target × 1.5 or errors occur
+- **Monitoring**: Polls backend metrics every 500ms (if enabled)
+- **Adjustment**: Evaluates every 1 second based on last 50 samples
 
 ### Common Options
 
@@ -426,18 +452,38 @@ asyncio.run(main())
 
 **CLI Integration:**
 
-The optimization features are automatically enabled when using batch mode:
+Enable adaptive concurrency control in streaming mode with the `--adaptive` flag:
 
 ```bash
-# Adaptive concurrency with vLLM backend
+# Basic adaptive concurrency
 sdg run \
   --yaml pipeline.yaml \
   --input data.jsonl \
   --output result.jsonl \
-  --batch-mode \
-  --max-batch 64 \
+  --adaptive \
   --min-batch 1 \
-  --target-latency 2000
+  --max-batch 32 \
+  --target-latency-ms 2000
+
+# With vLLM backend metrics
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --adaptive \
+  --use-vllm-metrics \
+  --min-batch 1 \
+  --max-batch 64
+
+# With request batching
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --adaptive \
+  --use-vllm-metrics \
+  --enable-request-batching \
+  --max-batch-size 32
 ```
 
 ### Multi-Backend Support
@@ -599,11 +645,12 @@ Output is always in JSONL format. The `final` fields defined in the `end` block 
 ### Example 1: Simple Q&A Pipeline
 
 ```bash
-# Using examples/sdg_demo.yaml
+# Using examples/sdg_demo.yaml with fixed concurrency
 sdg run \
   --yaml examples/sdg_demo.yaml \
   --input examples/data/input.jsonl \
-  --output output/qa_result.jsonl
+  --output output/qa_result.jsonl \
+  --max-concurrent 16
 ```
 
 ### Example 2: Pipeline Using v2 Features
@@ -617,15 +664,59 @@ sdg run \
   --max-concurrent 4
 ```
 
-### Example 3: Processing Large Datasets
+### Example 3: Processing Large Datasets with Fixed Concurrency
 
 ```bash
-# Stream processing large datasets
+# Stream processing large datasets with fixed concurrency
 sdg run \
   --yaml pipeline.yaml \
   --input large_dataset.jsonl \
   --output output/large_result.jsonl \
   --max-concurrent 16
+```
+
+### Example 4: Adaptive Concurrency for vLLM Backend
+
+```bash
+# Adaptive concurrency that adjusts based on latency
+sdg run \
+  --yaml examples/question_generator_agent_v2.yaml \
+  --input examples/data/question_generator_input.jsonl \
+  --output output/generated_questions_v2.jsonl \
+  --adaptive \
+  --min-batch 1 \
+  --max-batch 32 \
+  --target-latency-ms 2000
+```
+
+### Example 5: vLLM with Backend Metrics Optimization
+
+```bash
+# Use vLLM's Prometheus metrics for optimal concurrency control
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --adaptive \
+  --use-vllm-metrics \
+  --min-batch 1 \
+  --max-batch 64 \
+  --target-latency-ms 2000
+```
+
+### Example 6: Maximum Throughput with Request Batching
+
+```bash
+# Enable request batching for maximum throughput
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --adaptive \
+  --use-vllm-metrics \
+  --enable-request-batching \
+  --max-batch 64 \
+  --max-batch-size 32
 ```
 
 ---

@@ -17,7 +17,7 @@ class BatchOptimizer:
         self.min_batch = min_batch
         self.max_batch = max_batch
         self.target_latency_ms = target_latency_ms
-        self._current = min_batch
+        self._current = max_batch  # Start with max batch size for better throughput
 
     def current(self) -> int:
         return self._current
@@ -25,11 +25,27 @@ class BatchOptimizer:
     def update(self, latencies_ms: List[int], errors: int):
         if not latencies_ms:
             return
-        avg = sum(latencies_ms) / len(latencies_ms)
-        if errors > 0 or avg > self.target_latency_ms:
+
+        # Calculate per-request latency instead of total batch latency
+        # Since we process multiple requests in parallel, we should measure
+        # the average time per individual request, not the batch as a whole
+        total_latency = sum(latencies_ms)
+        num_requests = len(latencies_ms)
+        per_request_latency = total_latency / num_requests
+
+        # Adjust batch size based on per-request latency and error rate
+        error_rate = errors / num_requests if num_requests > 0 else 0
+
+        if error_rate > 0.05:  # More than 5% errors
+            # Decrease aggressively on errors
+            self._current = max(self.min_batch, self._current - 2)
+        elif per_request_latency > self.target_latency_ms:
+            # Decrease gradually if latency is too high
             self._current = max(self.min_batch, self._current - 1)
-        else:
+        elif per_request_latency < self.target_latency_ms * 0.7:
+            # Increase gradually if we have headroom
             self._current = min(self.max_batch, self._current + 1)
+        # else: keep current batch size (latency is in acceptable range)
 
 
 class LLMClient:

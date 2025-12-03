@@ -71,6 +71,10 @@ class AdaptiveController:
         # Timing
         adjustment_interval_ms: int = 1000,  # Minimum time between adjustments
         window_size: int = 50,  # Number of samples for averaging
+        # Initial concurrency
+        initial_concurrency: Optional[
+            int
+        ] = None,  # Initial concurrency level (default: max/2)
     ):
         """
         Initialize the adaptive controller.
@@ -86,6 +90,7 @@ class AdaptiveController:
             error_rate_threshold: Error rate threshold for decrease (default: 0.05)
             adjustment_interval_ms: Minimum interval between adjustments (default: 1000)
             window_size: Number of samples to consider (default: 50)
+            initial_concurrency: Initial concurrency level (default: max_concurrency / 2)
         """
         self.min_concurrency = min_concurrency
         self.max_concurrency = max_concurrency
@@ -100,8 +105,14 @@ class AdaptiveController:
         self.adjustment_interval = adjustment_interval_ms / 1000.0
         self.window_size = window_size
 
-        # State
-        self._current: int = min_concurrency
+        # State - 初期並行数を max から始める（最も積極的なスタート）
+        if initial_concurrency is not None:
+            self._current: int = max(
+                min_concurrency, min(initial_concurrency, max_concurrency)
+            )
+        else:
+            # デフォルト: max_concurrency から始める
+            self._current: int = max_concurrency
         self._latency_window: Deque[LatencySample] = deque(maxlen=window_size)
         self._last_adjustment_time: float = 0.0
         self._last_metrics: Optional[BackendMetrics] = None
@@ -196,9 +207,9 @@ class AdaptiveController:
         elif self._last_metrics and self._last_metrics.is_valid:
             queue_depth = self._last_metrics.queue_depth
             if queue_depth is not None:
-                if queue_depth > self.target_queue_depth * 2:
+                if queue_depth > self.target_queue_depth * 1.5:
                     should_decrease = True
-                elif queue_depth < self.target_queue_depth * 0.5:
+                elif queue_depth < self.target_queue_depth * 0.8:
                     should_increase = True
 
             # Check if backend is overloaded
@@ -208,8 +219,8 @@ class AdaptiveController:
         # Check if we have room to increase
         if (
             not should_decrease
-            and p95_latency < self.target_latency * 0.7
-            and error_rate < 0.01
+            and p95_latency < self.target_latency * 0.85
+            and error_rate < 0.02
         ):
             should_increase = True
 
@@ -283,7 +294,8 @@ class AdaptiveController:
 
     def reset(self) -> None:
         """Reset controller to initial state."""
-        self._current = self.min_concurrency
+        # 初期値を max_concurrency に戻す
+        self._current = self.max_concurrency
         self._latency_window.clear()
         self._last_adjustment_time = 0.0
         self._last_metrics = None

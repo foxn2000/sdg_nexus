@@ -39,17 +39,17 @@ sdg run --yaml examples/sdg_demo.yaml --input examples/data/input.jsonl --output
 
 ### 実行モード
 
-SDGには2つの実行モードがあります:
+SDGにはストリーミングデータ処理のための2つの実行モードがあります:
 
-#### 1. ストリーミングモード（デフォルト）
+#### 1. 固定並行数のストリーミングモード（デフォルト）
 
-各データ行を並列処理し、完了した行から順次出力ファイルへ書き込みます。
+固定された並行レベルで各データ行を並列処理し、完了した行から順次出力ファイルへ書き込みます。
 
 ```bash
 # ストリーミングモード（デフォルト）
 sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl
 
-# 同時処理数を指定
+# 固定並行数を指定
 sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --max-concurrent 16
 
 # 進捗表示を無効化
@@ -59,36 +59,62 @@ sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --no-progr
 **オプション:**
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
-| `--max-concurrent` | 8 | 同時処理行数の上限 |
+| `--max-concurrent` | 8 | 同時処理行数の上限（固定） |
 | `--no-progress` | false | 進捗表示を無効化 |
 
 **特徴:**
+- 実行中は並行数が固定
 - 途中結果が失われにくい（リアルタイム書き込み）
 - メモリ効率が良い
 - 出力順序は処理完了順（入力順序と異なる場合あり）
 
 > **Note:** 元の順序が必要な場合は、出力の `_row_index` フィールドでソートしてください。
 
-#### 2. バッチモード
+#### 2. 適応的並行性制御のストリーミングモード
 
-ブロック単位で一括処理を行います。`--batch-mode` フラグで有効化します。
+観測されたレイテンシやオプションのバックエンドメトリクスに基づいて、並行数を動的に調整します。`--adaptive` フラグで有効化します。
 
 ```bash
-# バッチモードを有効化
-sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --batch-mode
-
-# バッチサイズを指定
+# 適応的並行性制御を有効化
 sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
-  --batch-mode --max-batch 16 --min-batch 2 --target-latency-ms 5000
+  --adaptive --min-batch 1 --max-batch 32 --target-latency-ms 2000
+
+# vLLMバックエンドメトリクスを使用
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
+  --adaptive --use-vllm-metrics --min-batch 1 --max-batch 64
+
+# 高スループット向けリクエストバッチングを有効化
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
+  --adaptive --use-vllm-metrics --enable-request-batching
 ```
 
 **オプション:**
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
-| `--batch-mode` | false | バッチモードを有効化 |
-| `--max-batch` | 8 | ブロックあたりの最大同時リクエスト数 |
-| `--min-batch` | 1 | ブロックあたりの最小同時リクエスト数 |
-| `--target-latency-ms` | 3000 | 目標平均レイテンシ（ミリ秒） |
+| `--adaptive` | false | 適応的並行性制御を有効化 |
+| `--min-batch` | 1 | 最小並行処理数 |
+| `--max-batch` | 64 | 最大並行処理数 |
+| `--target-latency-ms` | 3000 | 目標P95レイテンシ（ミリ秒） |
+| `--target-queue-depth` | 32 | 目標バックエンドキュー深度 |
+| `--use-vllm-metrics` | false | vLLMのPrometheusメトリクスを使用 |
+| `--use-sglang-metrics` | false | SGLangのPrometheusメトリクスを使用 |
+| `--enable-request-batching` | false | リクエストバッチングを有効化 |
+| `--max-batch-size` | 32 | バッチあたりの最大リクエスト数 |
+| `--max-wait-ms` | 50 | バッチ形成の最大待機時間（ミリ秒） |
+
+**特徴:**
+- `--min-batch` と `--max-batch` の間で並行数を自動調整
+- レイテンシが低い場合は並行数を増加
+- エラー発生やレイテンシ急上昇時は並行数を減少
+- バックエンドメトリクス（vLLM/SGLang）を監視してより良い最適化
+- 最大スループットのためのオプションのリクエストバッチング
+
+**動作原理:**
+適応的コントローラーはAIMD（加法増加乗法減少）アルゴリズムを使用:
+- **増加**: P95レイテンシが目標値の0.7倍未満の場合、並行数に+2を加算
+- **減少**: レイテンシが目標値の1.5倍を超えるかエラーが発生した場合、50%減少
+- **監視**: バックエンドメトリクスを500msごとにポーリング（有効化時）
+- **調整**: 直近50サンプルに基づいて1秒ごとに評価
 
 ### 共通オプション
 
@@ -426,18 +452,38 @@ asyncio.run(main())
 
 **CLI統合:**
 
-バッチモード使用時、最適化機能は自動的に有効化されます:
+ストリーミングモードで `--adaptive` フラグを使用して適応的並行性制御を有効化:
 
 ```bash
-# vLLMバックエンドでの適応型並行制御
+# 基本的な適応的並行性制御
 sdg run \
   --yaml pipeline.yaml \
   --input data.jsonl \
   --output result.jsonl \
-  --batch-mode \
-  --max-batch 64 \
+  --adaptive \
   --min-batch 1 \
-  --target-latency 2000
+  --max-batch 32 \
+  --target-latency-ms 2000
+
+# vLLMバックエンドメトリクスを使用
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --adaptive \
+  --use-vllm-metrics \
+  --min-batch 1 \
+  --max-batch 64
+
+# リクエストバッチングを有効化
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --adaptive \
+  --use-vllm-metrics \
+  --enable-request-batching \
+  --max-batch-size 32
 ```
 
 ### マルチバックエンドサポート
@@ -599,11 +645,12 @@ AIとは何ですか？,tech
 ### 例1: シンプルなQ&Aパイプライン
 
 ```bash
-# examples/sdg_demo.yaml を使用
+# examples/sdg_demo.yaml を固定並行数で使用
 sdg run \
   --yaml examples/sdg_demo.yaml \
   --input examples/data/input.jsonl \
-  --output output/qa_result.jsonl
+  --output output/qa_result.jsonl \
+  --max-concurrent 16
 ```
 
 ### 例2: v2機能を使用したパイプライン
@@ -617,15 +664,59 @@ sdg run \
   --max-concurrent 4
 ```
 
-### 例3: 大量データの処理
+### 例3: 固定並行数で大量データの処理
 
 ```bash
-# 大量データをストリーミング処理
+# 大量データを固定並行数でストリーミング処理
 sdg run \
   --yaml pipeline.yaml \
   --input large_dataset.jsonl \
   --output output/large_result.jsonl \
   --max-concurrent 16
+```
+
+### 例4: vLLMバックエンドでの適応的並行性制御
+
+```bash
+# レイテンシに基づいて並行数を動的に調整
+sdg run \
+  --yaml examples/question_generator_agent_v2.yaml \
+  --input examples/data/question_generator_input.jsonl \
+  --output output/generated_questions_v2.jsonl \
+  --adaptive \
+  --min-batch 1 \
+  --max-batch 32 \
+  --target-latency-ms 2000
+```
+
+### 例5: vLLMメトリクスを使用した最適化
+
+```bash
+# vLLMのPrometheusメトリクスを使用して最適な並行制御
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --adaptive \
+  --use-vllm-metrics \
+  --min-batch 1 \
+  --max-batch 64 \
+  --target-latency-ms 2000
+```
+
+### 例6: リクエストバッチングで最大スループット
+
+```bash
+# 最大スループットのためリクエストバッチングを有効化
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --adaptive \
+  --use-vllm-metrics \
+  --enable-request-batching \
+  --max-batch 64 \
+  --max-batch-size 32
 ```
 
 ---

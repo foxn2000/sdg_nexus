@@ -383,13 +383,10 @@ class AdaptiveRequestBatcher(RequestBatcher[T]):
     @property
     def current_batch_size(self) -> int:
         """Get current dynamic batch size."""
-        if self.controller is not None:
-            # Use controller's concurrency as a guide for batch size
-            return min(
-                self.max_batch_size,
-                max(self.min_batch_size, self.controller.current_concurrency),
-            )
-        return self._current_batch_size
+        # バッチサイズは並行数とは独立して max_batch_size を使用
+        # バッチングの目的は複数リクエストを集約して送信することであり、
+        # 並行数制御とは別の概念
+        return self.max_batch_size
 
     async def _collect_batch(self) -> List[PendingRequest[T]]:
         """Collect requests with adaptive batch size."""
