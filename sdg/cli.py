@@ -1,7 +1,12 @@
 from __future__ import annotations
 import argparse
 import sys
-from .runner import run, run_streaming, run_streaming_adaptive
+from .runner import (
+    run,
+    run_streaming,
+    run_streaming_adaptive,
+    run_streaming_adaptive_batched,
+)
 
 
 # 日本語ヘルプメッセージ
@@ -23,7 +28,7 @@ SDG (Scalable Data Generator) CLI
   sdg --yaml <file> --input <file> --output <file> [オプション]
 """
 
-RUN_HELP_JA = """使い方: sdg run --yaml YAML --input INPUT --output OUTPUT [--save-intermediate] [--max-concurrent MAX_CONCURRENT] [--no-progress] [--batch-mode] [--max-batch MAX_BATCH] [--min-batch MIN_BATCH] [--target-latency-ms TARGET_LATENCY_MS] [--adaptive-concurrency] [--use-vllm-metrics] [--use-sglang-metrics]
+RUN_HELP_JA = """使い方: sdg run --yaml YAML --input INPUT --output OUTPUT [--save-intermediate] [--max-concurrent MAX_CONCURRENT] [--no-progress] [--batch-mode] [--max-batch MAX_BATCH] [--min-batch MIN_BATCH] [--target-latency-ms TARGET_LATENCY_MS] [--adaptive-concurrency] [--use-vllm-metrics] [--use-sglang-metrics] [--enable-request-batching]
 
 YAMLブループリントを入力データセットに対して実行
 
@@ -51,7 +56,15 @@ YAMLブループリントを入力データセットに対して実行
   --target-queue-depth TARGET_QUEUE_DEPTH
                           目標バックエンドキュー深度（デフォルト: 32）
 
-バッチモードオプション（ブロック単位の処理）:
+リクエストバッチングオプション（適応的制御時）:
+  --enable-request-batching
+                          リクエストバッチングを有効化（複数リクエストを集約して送信）
+  --max-batch-size MAX_BATCH_SIZE
+                          バッチあたりの最大リクエスト数（デフォルト: 32）
+  --max-wait-ms MAX_WAIT_MS
+                          バッチ形成の最大待機時間（ミリ秒、デフォルト: 50）
+
+バッチモードオプション（ブロック単位の処理、レガシー）:
   --batch-mode            バッチモードを使用（ストリーミングの代わりにブロック単位で処理）
   --max-batch MAX_BATCH   ブロックあたりの最大並行リクエスト数 (バッチモードのみ、デフォルト: 8)
   --min-batch MIN_BATCH   ブロックあたりの最小並行リクエスト数 (バッチモードのみ、デフォルト: 1)
@@ -68,7 +81,10 @@ YAMLブループリントを入力データセットに対して実行
   # vLLMメトリクスを使用した適応的並行性制御
   sdg run --yaml config.yaml --input data.jsonl --output result.jsonl --adaptive-concurrency --use-vllm-metrics
 
-  # バッチモード
+  # リクエストバッチングを有効化（高スループット向け）
+  sdg run --yaml config.yaml --input data.jsonl --output result.jsonl --adaptive-concurrency --use-vllm-metrics --enable-request-batching
+
+  # バッチモード（レガシー）
   sdg run --yaml config.yaml --input data.jsonl --output result.jsonl --batch-mode
 
   # 中間出力を保存
@@ -76,7 +92,7 @@ YAMLブループリントを入力データセットに対して実行
 """
 
 # Legacy mode help message in Japanese
-LEGACY_HELP_JA = """使い方: sdg --yaml YAML --input INPUT --output OUTPUT [--save-intermediate] [--max-concurrent MAX_CONCURRENT] [--no-progress] [--batch-mode] [--max-batch MAX_BATCH] [--min-batch MIN_BATCH] [--target-latency-ms TARGET_LATENCY_MS] [--adaptive-concurrency] [--use-vllm-metrics] [--use-sglang-metrics]
+LEGACY_HELP_JA = """使い方: sdg --yaml YAML --input INPUT --output OUTPUT [--save-intermediate] [--max-concurrent MAX_CONCURRENT] [--no-progress] [--batch-mode] [--max-batch MAX_BATCH] [--min-batch MIN_BATCH] [--target-latency-ms TARGET_LATENCY_MS] [--adaptive-concurrency] [--use-vllm-metrics] [--use-sglang-metrics] [--enable-request-batching]
 
 SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
 
@@ -98,6 +114,12 @@ SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
                         最小並行処理数（適応的制御時、デフォルト: 1）
   --target-queue-depth TARGET_QUEUE_DEPTH
                         目標バックエンドキュー深度（デフォルト: 32）
+  --enable-request-batching
+                        リクエストバッチングを有効化
+  --max-batch-size MAX_BATCH_SIZE
+                        バッチあたりの最大リクエスト数（デフォルト: 32）
+  --max-wait-ms MAX_WAIT_MS
+                        バッチ形成の最大待機時間（ミリ秒、デフォルト: 50）
   --batch-mode          バッチモードを使用（ストリーミングの代わりにブロック単位で処理）
   --max-batch MAX_BATCH
                         ブロックあたりの最大並行リクエスト数 (バッチモードのみ、デフォルト: 8)
@@ -159,6 +181,25 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=int,
         default=32,
         help="Target backend queue depth (adaptive mode, default: 32)",
+    )
+
+    # Request batching options (for adaptive mode)
+    p.add_argument(
+        "--enable-request-batching",
+        action="store_true",
+        help="Enable request batching (groups multiple requests before sending)",
+    )
+    p.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=32,
+        help="Max requests per batch (default: 32)",
+    )
+    p.add_argument(
+        "--max-wait-ms",
+        type=int,
+        default=50,
+        help="Max wait time for batch formation in ms (default: 50)",
     )
 
     # Batch mode options (block-by-block processing)
@@ -226,18 +267,35 @@ def _execute_run(args):
         elif args.use_sglang_metrics:
             metrics_type = "sglang"
 
-        run_streaming_adaptive(
-            args.yaml,
-            args.input,
-            args.output,
-            max_concurrent=max_concurrent,
-            min_concurrent=args.min_concurrent,
-            target_latency_ms=args.target_latency_ms,
-            target_queue_depth=args.target_queue_depth,
-            metrics_type=metrics_type,
-            save_intermediate=args.save_intermediate,
-            show_progress=not args.no_progress,
-        )
+        if args.enable_request_batching:
+            # Use batched adaptive mode
+            run_streaming_adaptive_batched(
+                args.yaml,
+                args.input,
+                args.output,
+                max_concurrent=max_concurrent,
+                min_concurrent=args.min_concurrent,
+                target_latency_ms=args.target_latency_ms,
+                target_queue_depth=args.target_queue_depth,
+                metrics_type=metrics_type,
+                max_batch_size=args.max_batch_size,
+                max_wait_ms=args.max_wait_ms,
+                save_intermediate=args.save_intermediate,
+                show_progress=not args.no_progress,
+            )
+        else:
+            run_streaming_adaptive(
+                args.yaml,
+                args.input,
+                args.output,
+                max_concurrent=max_concurrent,
+                min_concurrent=args.min_concurrent,
+                target_latency_ms=args.target_latency_ms,
+                target_queue_depth=args.target_queue_depth,
+                metrics_type=metrics_type,
+                save_intermediate=args.save_intermediate,
+                show_progress=not args.no_progress,
+            )
     else:
         # Streaming mode: row-by-row processing (default)
         # Support legacy --max-concurrent-rows option

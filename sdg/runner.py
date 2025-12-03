@@ -6,6 +6,7 @@ from .executors import (
     run_pipeline,
     run_pipeline_streaming,
     run_pipeline_streaming_adaptive,
+    run_pipeline_streaming_adaptive_batched,
     StreamingResult,
 )
 
@@ -186,6 +187,159 @@ async def _run_streaming_adaptive_async(
             print(f"Successfully processed all {total} rows.", file=sys.stderr)
 
     return completed, errors
+
+
+async def _run_streaming_adaptive_batched_async(
+    cfg,
+    dataset: List[Dict[str, Any]],
+    output_path: str,
+    max_concurrent: int,
+    min_concurrent: int,
+    target_latency_ms: int,
+    target_queue_depth: int,
+    metrics_type: str,
+    max_batch_size: int,
+    max_wait_ms: int,
+    save_intermediate: bool,
+    show_progress: bool = True,
+):
+    """バッチング付き適応的並行性制御ストリーミング版パイプライン実行（非同期）"""
+    # 出力ディレクトリ作成
+    dir_name = os.path.dirname(output_path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
+
+    # ファイル書き込み用ロック
+    write_lock = asyncio.Lock()
+
+    total = len(dataset)
+    completed = 0
+    errors = 0
+
+    # 出力ファイルを開く
+    with open(output_path, "w", encoding="utf-8") as f:
+        async for result in run_pipeline_streaming_adaptive_batched(
+            cfg,
+            dataset,
+            max_concurrent=max_concurrent,
+            min_concurrent=min_concurrent,
+            target_latency_ms=target_latency_ms,
+            target_queue_depth=target_queue_depth,
+            metrics_type=metrics_type,
+            max_batch_size=max_batch_size,
+            max_wait_ms=max_wait_ms,
+            save_intermediate=save_intermediate,
+        ):
+            completed += 1
+
+            if result.error:
+                errors += 1
+                if show_progress:
+                    print(
+                        f"\r[{completed}/{total}] Error in row {result.row_index}: {result.error}",
+                        file=sys.stderr,
+                    )
+                result_with_error = {
+                    "_row_index": result.row_index,
+                    "_error": str(result.error),
+                    **result.data,
+                }
+                async with write_lock:
+                    f.write(json.dumps(result_with_error, ensure_ascii=False) + "\n")
+                    f.flush()
+            else:
+                result_data = {
+                    "_row_index": result.row_index,
+                    **result.data,
+                }
+                async with write_lock:
+                    f.write(json.dumps(result_data, ensure_ascii=False) + "\n")
+                    f.flush()
+
+                if show_progress:
+                    print(
+                        f"\r[{completed}/{total}] Completed row {result.row_index}",
+                        end="",
+                        file=sys.stderr,
+                    )
+
+    if show_progress:
+        print(file=sys.stderr)
+        if errors > 0:
+            print(
+                f"Completed with {errors} errors out of {total} rows.", file=sys.stderr
+            )
+        else:
+            print(f"Successfully processed all {total} rows.", file=sys.stderr)
+
+    return completed, errors
+
+
+def run_streaming_adaptive_batched(
+    yaml_path: str,
+    input_path: str,
+    output_path: str,
+    max_concurrent: int = 64,
+    min_concurrent: int = 1,
+    target_latency_ms: int = 3000,
+    target_queue_depth: int = 32,
+    metrics_type: str = "none",
+    max_batch_size: int = 32,
+    max_wait_ms: int = 50,
+    save_intermediate: bool = False,
+    show_progress: bool = True,
+):
+    """
+    バッチング付き適応的並行性制御ストリーミング版パイプライン実行
+
+    レイテンシとオプションのバックエンドメトリクスに基づいて、
+    並行処理数を動的に調整し、リクエストをバッチングしながら実行する。
+
+    Args:
+        yaml_path: YAMLブループリントのパス
+        input_path: 入力データセット (.jsonl or .csv)
+        output_path: 出力JSONLファイルのパス
+        max_concurrent: 同時処理行数の上限 (デフォルト: 64)
+        min_concurrent: 同時処理行数の下限 (デフォルト: 1)
+        target_latency_ms: 目標レイテンシ (ミリ秒、デフォルト: 3000)
+        target_queue_depth: 目標バックエンドキュー深度 (デフォルト: 32)
+        metrics_type: メトリクスタイプ ("none", "vllm", "sglang")
+        max_batch_size: 最大バッチサイズ (デフォルト: 32)
+        max_wait_ms: バッチ形成の最大待機時間 (ミリ秒、デフォルト: 50)
+        save_intermediate: 中間結果を保存するか
+        show_progress: 進捗表示を行うか
+
+    Note:
+        出力順序は処理完了順となるため、入力順序と異なる場合がある。
+        元の順序が必要な場合は _row_index フィールドでソートすること。
+    """
+    cfg = load_config(yaml_path)
+
+    # load data
+    if input_path.endswith(".jsonl"):
+        ds = read_jsonl(input_path)
+    elif input_path.endswith(".csv"):
+        ds = read_csv(input_path)
+    else:
+        raise ValueError("Unsupported input format. Use .jsonl or .csv")
+
+    # run
+    asyncio.run(
+        _run_streaming_adaptive_batched_async(
+            cfg,
+            ds,
+            output_path,
+            max_concurrent=max_concurrent,
+            min_concurrent=min_concurrent,
+            target_latency_ms=target_latency_ms,
+            target_queue_depth=target_queue_depth,
+            metrics_type=metrics_type,
+            max_batch_size=max_batch_size,
+            max_wait_ms=max_wait_ms,
+            save_intermediate=save_intermediate,
+            show_progress=show_progress,
+        )
+    )
 
 
 def run_streaming_adaptive(
