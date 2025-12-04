@@ -1,0 +1,1148 @@
+# 三次元スケーリング推論エージェント
+# 3つの軸でLLMの能力を最適化: 推論時間 × モデル性能（推論エフォート）× 並列数
+#
+# 概要:
+#   - 質問の難易度・特性に応じて、推論エフォートと並列数を動的に調整
+#   - 複数の視点から並列に推論し、結果を統合
+#   - 品質が不十分な場合は最大5回まで反復改善
+#
+# 三次元スケーリングの軸:
+#   1. 推論時間: 反復回数（最大5回）と各ステップの深さ
+#   2. モデル性能: プロンプトで制御する推論エフォート（low/medium/high）
+#   3. 並列数: 同時に検討する視点の数（最大10個）
+
+mabel:
+  version: "2.0"
+  id: "com.example.agent.3d_scaling"
+  name: "3D Scaling Inference Agent"
+  description: |
+    三次元スケーリング（推論時間×モデル性能×並列数）を活用した高度な推論システム。
+    質問の難易度・特性を分析し、最適なリソース配分で回答を生成します。
+
+# モデル設定（qwen3のみ使用）
+models:
+  - name: qwen3
+    api_model: qwen3
+    api_key: "sk-local"
+    base_url: http://localhost:8000/v1
+    request_defaults:
+      temperature: 0.7
+      max_tokens: 4096
+      top_p: 0.9
+
+# グローバル変数
+globals:
+  const:
+    MAX_ITERATIONS: 5
+    MAX_PARALLEL: 10
+    APP_NAME: "3D Scaling Inference Agent"
+  vars:
+    # 反復制御
+    iteration: 0
+    is_sufficient: false
+    
+    # 難易度分析結果
+    question_type: ""
+    difficulty_level: ""
+    reasoning_effort: ""
+    parallel_count: 0
+    
+    # 視点とプロンプト
+    perspectives: []
+    perspective_prompts: []
+    
+    # 各視点からの回答（最大10個）
+    answer_1: ""
+    answer_2: ""
+    answer_3: ""
+    answer_4: ""
+    answer_5: ""
+    answer_6: ""
+    answer_7: ""
+    answer_8: ""
+    answer_9: ""
+    answer_10: ""
+    
+    # 統合結果
+    integrated_answer: ""
+    missing_aspects: ""
+    quality_score: 0
+    
+    # 最終結果
+    synthesized_answer: ""
+    final_answer: ""
+    
+    # 累積ログ
+    all_iteration_logs: ""
+
+# 予算設定
+budgets:
+  loops:
+    max_iters: 100
+    on_exceed: "truncate"
+  recursion:
+    max_depth: 16
+    on_exceed: "error"
+  wall_time_ms: 900000
+  ai:
+    max_calls: 100
+    max_tokens: 500000
+
+blocks:
+  # ============================================================
+  # 初期化
+  # ============================================================
+  - type: logic
+    exec: 1
+    id: initialize
+    name: "Initialize Variables"
+    op: set
+    var: iteration
+    value: 0
+    outputs:
+      - name: InitIteration
+        from: value
+
+  - type: logic
+    exec: 2
+    id: reset_sufficient
+    name: "Reset Sufficiency Flag"
+    op: set
+    var: is_sufficient
+    value: false
+    outputs:
+      - name: InitSufficient
+        from: value
+
+  # ============================================================
+  # ステップ1: 質問の難易度・特性判定
+  # ============================================================
+  - type: ai
+    exec: 10
+    id: analyze_question
+    name: "Step 1: Analyze Question Difficulty and Characteristics"
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは質問分析の専門家です。与えられた質問の難易度と特性を分析し、
+      最適な推論戦略を決定します。
+      
+      # タスク
+      質問を以下の観点から分析してください：
+      
+      ## 1. 質問タイプの判定
+      - **広く浅い質問**: 多くの側面を概観的に扱う質問（例：「〇〇について教えて」）
+      - **深く狭い質問**: 特定のトピックを深く掘り下げる質問（例：「〇〇の原理を詳細に説明して」）
+      - **複合的な質問**: 複数の要素を組み合わせた質問
+      
+      ## 2. 難易度レベル（1-5）
+      - 1: 単純な事実確認
+      - 2: 基本的な説明・解説
+      - 3: 分析・比較が必要
+      - 4: 複合的な推論が必要
+      - 5: 高度な専門知識と深い考察が必要
+      
+      ## 3. 推論エフォート
+      - **low**: 簡潔で直感的な回答（難易度1-2、または広く浅い質問）
+      - **medium**: バランスの取れた詳細度（難易度3）
+      - **high**: 深い分析と詳細な根拠（難易度4-5、または深く狭い質問）
+      
+      ## 4. 推奨並列数（1-10）
+      - 広く浅い質問 → 多くの視点（6-10）
+      - 深く狭い質問 → 少ない視点で深く（2-4）
+      - 複合的な質問 → 中程度の視点（4-6）
+      
+      # 出力形式
+      必ず以下のXMLタグ形式で出力してください：
+      <think>分析プロセス</think>
+      <question_type>broad_shallow / deep_narrow / composite</question_type>
+      <difficulty>1-5の数値</difficulty>
+      <reasoning_effort>low / medium / high</reasoning_effort>
+      <parallel_count>1-10の数値</parallel_count>
+      <analysis_summary>分析の要約（2-3文）</analysis_summary>
+    prompts:
+      - |
+        以下の質問を分析し、最適な推論戦略を決定してください。
+        
+        ═══════════════════════════════════════
+        【質問】
+        {question}
+        ═══════════════════════════════════════
+        
+        質問タイプ、難易度、推論エフォート、推奨並列数を判定してください。
+    outputs:
+      - name: QuestionType
+        select: tag
+        tag: question_type
+      - name: DifficultyLevel
+        select: tag
+        tag: difficulty
+      - name: ReasoningEffort
+        select: tag
+        tag: reasoning_effort
+      - name: ParallelCount
+        select: tag
+        tag: parallel_count
+      - name: AnalysisSummary
+        select: tag
+        tag: analysis_summary
+      - name: AnalysisThinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        question_type: QuestionType
+        difficulty_level: DifficultyLevel
+        reasoning_effort: ReasoningEffort
+        parallel_count: ParallelCount
+
+  # ============================================================
+  # ステップ2: 視点分割とプロンプト生成
+  # ============================================================
+  - type: ai
+    exec: 20
+    id: generate_perspectives
+    name: "Step 2: Generate Perspectives and Prompts"
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたはプロンプト設計の専門家です。質問を複数の視点から検討するための
+      個別プロンプトを生成します。
+      
+      # タスク
+      分析結果に基づき、指定された数の視点を生成し、それぞれに対応するプロンプトを作成してください。
+      
+      ## 視点の種類（必要に応じて選択・組み合わせ）
+      1. **事実・定義**: 基本的な事実や定義を確認
+      2. **原因・理由**: なぜそうなるのかを分析
+      3. **方法・プロセス**: どのように行うかを説明
+      4. **比較・対照**: 類似・対立概念との比較
+      5. **影響・結果**: 結果や波及効果を検討
+      6. **歴史・背景**: 時間軸での発展や背景
+      7. **実例・応用**: 具体的な事例や応用場面
+      8. **批判・限界**: 問題点や限界の検討
+      9. **将来・展望**: 今後の可能性や発展
+      10. **統合・総括**: 全体を俯瞰した視点
+      
+      ## プロンプト生成のルール
+      - 各視点は独立して回答可能であること
+      - 推論エフォートに応じた詳細度を指定すること
+        - low: 「簡潔に」「要点のみ」
+        - medium: 「適度な詳細度で」「バランスよく」
+        - high: 「詳細に」「根拠を示して」「多角的に分析して」
+      - プロンプトは具体的で、曖昧さがないこと
+      
+      # 出力形式
+      <think>視点選定の思考プロセス</think>
+      <perspectives>
+      1. [視点名]: プロンプト内容
+      2. [視点名]: プロンプト内容
+      ...（指定された数だけ）
+      </perspectives>
+    prompts:
+      - |
+        以下の質問に対して、{ParallelCount}個の異なる視点からのプロンプトを生成してください。
+        
+        ═══════════════════════════════════════
+        【元の質問】
+        {question}
+        
+        【分析結果】
+        - 質問タイプ: {QuestionType}
+        - 難易度: {DifficultyLevel}
+        - 推論エフォート: {ReasoningEffort}
+        - 並列数: {ParallelCount}
+        ═══════════════════════════════════════
+        
+        推論エフォートが「{ReasoningEffort}」であることを考慮し、
+        各プロンプトの詳細度を適切に調整してください。
+    outputs:
+      - name: Perspectives
+        select: tag
+        tag: perspectives
+      - name: PerspectiveThinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        perspectives: Perspectives
+
+  # ============================================================
+  # ステップ2.5: 視点を個別に分離
+  # ============================================================
+  - type: python
+    exec: 25
+    id: split_perspectives
+    name: "Step 2.5: Split Perspectives into Individual Prompts"
+    function: split_3d_perspectives
+    code_path: ./examples/helpers/format_helpers.py
+    inputs:
+      perspectives: "{Perspectives}"
+      parallel_count: "{ParallelCount}"
+      original_question: "{question}"
+      reasoning_effort: "{ReasoningEffort}"
+    outputs: [Prompt1, Prompt2, Prompt3, Prompt4, Prompt5, Prompt6, Prompt7, Prompt8, Prompt9, Prompt10, ActualParallelCount]
+    use_env: "global"
+    ctx_access: ["vars.read", "log"]
+
+  # ============================================================
+  # ステップ3: 並列推論処理（最大10個の視点）
+  # 各視点からの推論を独立して実行
+  # ============================================================
+
+  # --- 視点1からの推論 ---
+  - type: ai
+    exec: 31
+    id: parallel_inference_1
+    name: "Step 3-1: Parallel Inference from Perspective 1"
+    run_if:
+      gte: ["{ActualParallelCount}", 1]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは特定の視点から質問に回答する専門家です。
+      
+      # 推論エフォートレベル: {ReasoningEffort}
+      
+      ## エフォートレベル別の回答ガイドライン
+      - **low**: 簡潔に要点のみを述べてください（100-200字程度）
+      - **medium**: バランスの取れた詳細度で回答してください（200-400字程度）
+      - **high**: 詳細な分析と根拠を示してください（400-800字程度）
+      
+      # 出力形式
+      <think>あなたの思考プロセス</think>
+      <answer>この視点からの回答</answer>
+      <confidence>回答の確信度（0-100）</confidence>
+    prompts:
+      - |
+        {Prompt1}
+    outputs:
+      - name: Answer1
+        select: tag
+        tag: answer
+      - name: Confidence1
+        select: tag
+        tag: confidence
+      - name: Thinking1
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        answer_1: Answer1
+
+  # --- 視点2からの推論 ---
+  - type: ai
+    exec: 32
+    id: parallel_inference_2
+    name: "Step 3-2: Parallel Inference from Perspective 2"
+    run_if:
+      gte: ["{ActualParallelCount}", 2]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは特定の視点から質問に回答する専門家です。
+      
+      # 推論エフォートレベル: {ReasoningEffort}
+      
+      ## エフォートレベル別の回答ガイドライン
+      - **low**: 簡潔に要点のみを述べてください（100-200字程度）
+      - **medium**: バランスの取れた詳細度で回答してください（200-400字程度）
+      - **high**: 詳細な分析と根拠を示してください（400-800字程度）
+      
+      # 出力形式
+      <think>あなたの思考プロセス</think>
+      <answer>この視点からの回答</answer>
+      <confidence>回答の確信度（0-100）</confidence>
+    prompts:
+      - |
+        {Prompt2}
+    outputs:
+      - name: Answer2
+        select: tag
+        tag: answer
+      - name: Confidence2
+        select: tag
+        tag: confidence
+      - name: Thinking2
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        answer_2: Answer2
+
+  # --- 視点3からの推論 ---
+  - type: ai
+    exec: 33
+    id: parallel_inference_3
+    name: "Step 3-3: Parallel Inference from Perspective 3"
+    run_if:
+      gte: ["{ActualParallelCount}", 3]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは特定の視点から質問に回答する専門家です。
+      
+      # 推論エフォートレベル: {ReasoningEffort}
+      
+      ## エフォートレベル別の回答ガイドライン
+      - **low**: 簡潔に要点のみを述べてください（100-200字程度）
+      - **medium**: バランスの取れた詳細度で回答してください（200-400字程度）
+      - **high**: 詳細な分析と根拠を示してください（400-800字程度）
+      
+      # 出力形式
+      <think>あなたの思考プロセス</think>
+      <answer>この視点からの回答</answer>
+      <confidence>回答の確信度（0-100）</confidence>
+    prompts:
+      - |
+        {Prompt3}
+    outputs:
+      - name: Answer3
+        select: tag
+        tag: answer
+      - name: Confidence3
+        select: tag
+        tag: confidence
+      - name: Thinking3
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        answer_3: Answer3
+
+  # --- 視点4からの推論 ---
+  - type: ai
+    exec: 34
+    id: parallel_inference_4
+    name: "Step 3-4: Parallel Inference from Perspective 4"
+    run_if:
+      gte: ["{ActualParallelCount}", 4]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは特定の視点から質問に回答する専門家です。
+      
+      # 推論エフォートレベル: {ReasoningEffort}
+      
+      ## エフォートレベル別の回答ガイドライン
+      - **low**: 簡潔に要点のみを述べてください（100-200字程度）
+      - **medium**: バランスの取れた詳細度で回答してください（200-400字程度）
+      - **high**: 詳細な分析と根拠を示してください（400-800字程度）
+      
+      # 出力形式
+      <think>あなたの思考プロセス</think>
+      <answer>この視点からの回答</answer>
+      <confidence>回答の確信度（0-100）</confidence>
+    prompts:
+      - |
+        {Prompt4}
+    outputs:
+      - name: Answer4
+        select: tag
+        tag: answer
+      - name: Confidence4
+        select: tag
+        tag: confidence
+      - name: Thinking4
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        answer_4: Answer4
+
+  # --- 視点5からの推論 ---
+  - type: ai
+    exec: 35
+    id: parallel_inference_5
+    name: "Step 3-5: Parallel Inference from Perspective 5"
+    run_if:
+      gte: ["{ActualParallelCount}", 5]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは特定の視点から質問に回答する専門家です。
+      
+      # 推論エフォートレベル: {ReasoningEffort}
+      
+      ## エフォートレベル別の回答ガイドライン
+      - **low**: 簡潔に要点のみを述べてください（100-200字程度）
+      - **medium**: バランスの取れた詳細度で回答してください（200-400字程度）
+      - **high**: 詳細な分析と根拠を示してください（400-800字程度）
+      
+      # 出力形式
+      <think>あなたの思考プロセス</think>
+      <answer>この視点からの回答</answer>
+      <confidence>回答の確信度（0-100）</confidence>
+    prompts:
+      - |
+        {Prompt5}
+    outputs:
+      - name: Answer5
+        select: tag
+        tag: answer
+      - name: Confidence5
+        select: tag
+        tag: confidence
+      - name: Thinking5
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        answer_5: Answer5
+
+  # --- 視点6からの推論 ---
+  - type: ai
+    exec: 36
+    id: parallel_inference_6
+    name: "Step 3-6: Parallel Inference from Perspective 6"
+    run_if:
+      gte: ["{ActualParallelCount}", 6]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは特定の視点から質問に回答する専門家です。
+      
+      # 推論エフォートレベル: {ReasoningEffort}
+      
+      ## エフォートレベル別の回答ガイドライン
+      - **low**: 簡潔に要点のみを述べてください（100-200字程度）
+      - **medium**: バランスの取れた詳細度で回答してください（200-400字程度）
+      - **high**: 詳細な分析と根拠を示してください（400-800字程度）
+      
+      # 出力形式
+      <think>あなたの思考プロセス</think>
+      <answer>この視点からの回答</answer>
+      <confidence>回答の確信度（0-100）</confidence>
+    prompts:
+      - |
+        {Prompt6}
+    outputs:
+      - name: Answer6
+        select: tag
+        tag: answer
+      - name: Confidence6
+        select: tag
+        tag: confidence
+      - name: Thinking6
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        answer_6: Answer6
+
+  # --- 視点7からの推論 ---
+  - type: ai
+    exec: 37
+    id: parallel_inference_7
+    name: "Step 3-7: Parallel Inference from Perspective 7"
+    run_if:
+      gte: ["{ActualParallelCount}", 7]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは特定の視点から質問に回答する専門家です。
+      
+      # 推論エフォートレベル: {ReasoningEffort}
+      
+      ## エフォートレベル別の回答ガイドライン
+      - **low**: 簡潔に要点のみを述べてください（100-200字程度）
+      - **medium**: バランスの取れた詳細度で回答してください（200-400字程度）
+      - **high**: 詳細な分析と根拠を示してください（400-800字程度）
+      
+      # 出力形式
+      <think>あなたの思考プロセス</think>
+      <answer>この視点からの回答</answer>
+      <confidence>回答の確信度（0-100）</confidence>
+    prompts:
+      - |
+        {Prompt7}
+    outputs:
+      - name: Answer7
+        select: tag
+        tag: answer
+      - name: Confidence7
+        select: tag
+        tag: confidence
+      - name: Thinking7
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        answer_7: Answer7
+
+  # --- 視点8からの推論 ---
+  - type: ai
+    exec: 38
+    id: parallel_inference_8
+    name: "Step 3-8: Parallel Inference from Perspective 8"
+    run_if:
+      gte: ["{ActualParallelCount}", 8]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは特定の視点から質問に回答する専門家です。
+      
+      # 推論エフォートレベル: {ReasoningEffort}
+      
+      ## エフォートレベル別の回答ガイドライン
+      - **low**: 簡潔に要点のみを述べてください（100-200字程度）
+      - **medium**: バランスの取れた詳細度で回答してください（200-400字程度）
+      - **high**: 詳細な分析と根拠を示してください（400-800字程度）
+      
+      # 出力形式
+      <think>あなたの思考プロセス</think>
+      <answer>この視点からの回答</answer>
+      <confidence>回答の確信度（0-100）</confidence>
+    prompts:
+      - |
+        {Prompt8}
+    outputs:
+      - name: Answer8
+        select: tag
+        tag: answer
+      - name: Confidence8
+        select: tag
+        tag: confidence
+      - name: Thinking8
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        answer_8: Answer8
+
+  # --- 視点9からの推論 ---
+  - type: ai
+    exec: 39
+    id: parallel_inference_9
+    name: "Step 3-9: Parallel Inference from Perspective 9"
+    run_if:
+      gte: ["{ActualParallelCount}", 9]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは特定の視点から質問に回答する専門家です。
+      
+      # 推論エフォートレベル: {ReasoningEffort}
+      
+      ## エフォートレベル別の回答ガイドライン
+      - **low**: 簡潔に要点のみを述べてください（100-200字程度）
+      - **medium**: バランスの取れた詳細度で回答してください（200-400字程度）
+      - **high**: 詳細な分析と根拠を示してください（400-800字程度）
+      
+      # 出力形式
+      <think>あなたの思考プロセス</think>
+      <answer>この視点からの回答</answer>
+      <confidence>回答の確信度（0-100）</confidence>
+    prompts:
+      - |
+        {Prompt9}
+    outputs:
+      - name: Answer9
+        select: tag
+        tag: answer
+      - name: Confidence9
+        select: tag
+        tag: confidence
+      - name: Thinking9
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        answer_9: Answer9
+
+  # --- 視点10からの推論 ---
+  - type: ai
+    exec: 40
+    id: parallel_inference_10
+    name: "Step 3-10: Parallel Inference from Perspective 10"
+    run_if:
+      gte: ["{ActualParallelCount}", 10]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは特定の視点から質問に回答する専門家です。
+      
+      # 推論エフォートレベル: {ReasoningEffort}
+      
+      ## エフォートレベル別の回答ガイドライン
+      - **low**: 簡潔に要点のみを述べてください（100-200字程度）
+      - **medium**: バランスの取れた詳細度で回答してください（200-400字程度）
+      - **high**: 詳細な分析と根拠を示してください（400-800字程度）
+      
+      # 出力形式
+      <think>あなたの思考プロセス</think>
+      <answer>この視点からの回答</answer>
+      <confidence>回答の確信度（0-100）</confidence>
+    prompts:
+      - |
+        {Prompt10}
+    outputs:
+      - name: Answer10
+        select: tag
+        tag: answer
+      - name: Confidence10
+        select: tag
+        tag: confidence
+      - name: Thinking10
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        answer_10: Answer10
+
+  # ============================================================
+  # ステップ4: 推論結果の統合と不足部分の判定
+  # ============================================================
+  - type: python
+    exec: 50
+    id: collect_answers
+    name: "Step 4a: Collect All Answers"
+    function: collect_3d_answers
+    code_path: ./examples/helpers/format_helpers.py
+    inputs:
+      parallel_count: "{ActualParallelCount}"
+      answer_1: "{answer_1}"
+      answer_2: "{answer_2}"
+      answer_3: "{answer_3}"
+      answer_4: "{answer_4}"
+      answer_5: "{answer_5}"
+      answer_6: "{answer_6}"
+      answer_7: "{answer_7}"
+      answer_8: "{answer_8}"
+      answer_9: "{answer_9}"
+      answer_10: "{answer_10}"
+      perspectives: "{Perspectives}"
+    outputs: [CollectedAnswers, AnswerSummary]
+    use_env: "global"
+    ctx_access: ["vars.read", "log"]
+
+  - type: ai
+    exec: 51
+    id: integrate_and_evaluate
+    name: "Step 4b: Integrate Answers and Evaluate Quality"
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは複数の回答を統合し、品質を評価する専門家です。
+      
+      # タスク
+      複数の視点からの回答を統合し、以下を判定してください：
+      
+      ## 1. 回答の統合
+      - 各視点からの回答を整理・統合
+      - 矛盾する情報の調整
+      - 重複の除去と論理的な構造化
+      
+      ## 2. 品質評価（0-100点）
+      評価基準：
+      - 網羅性（25点）: 質問のすべての側面がカバーされているか
+      - 深さ（25点）: 十分な詳細度と分析の深さがあるか
+      - 整合性（25点）: 論理的な一貫性があるか
+      - 明確性（25点）: 回答が明確で理解しやすいか
+      
+      ## 3. 不足部分の特定
+      - 70点以上: 十分な品質。追加の推論は不要
+      - 70点未満: 不足部分を明確にし、追加の推論が必要
+      
+      # 出力形式
+      <think>統合と評価のプロセス</think>
+      <integrated_answer>統合された回答</integrated_answer>
+      <quality_score>0-100の数値</quality_score>
+      <is_sufficient>true / false</is_sufficient>
+      <missing_aspects>不足している観点（70点未満の場合）</missing_aspects>
+      <improvement_suggestions>改善提案</improvement_suggestions>
+    prompts:
+      - |
+        以下の複数の視点からの回答を統合し、品質を評価してください。
+        
+        ═══════════════════════════════════════
+        【元の質問】
+        {question}
+        
+        【質問分析】
+        - 質問タイプ: {QuestionType}
+        - 難易度: {DifficultyLevel}
+        - 推論エフォート: {ReasoningEffort}
+        
+        【各視点からの回答】
+        {CollectedAnswers}
+        ═══════════════════════════════════════
+        
+        回答を統合し、品質スコア（0-100）と不足部分を判定してください。
+        スコアが70点以上であれば is_sufficient を true にしてください。
+    outputs:
+      - name: IntegratedAnswer
+        select: tag
+        tag: integrated_answer
+      - name: QualityScore
+        select: tag
+        tag: quality_score
+      - name: IsSufficient
+        select: tag
+        tag: is_sufficient
+      - name: MissingAspects
+        select: tag
+        tag: missing_aspects
+      - name: ImprovementSuggestions
+        select: tag
+        tag: improvement_suggestions
+      - name: IntegrationThinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        integrated_answer: IntegratedAnswer
+        quality_score: QualityScore
+        missing_aspects: MissingAspects
+
+  # ============================================================
+  # ステップ4c: 反復判定と制御
+  # ============================================================
+  - type: logic
+    exec: 52
+    id: check_sufficiency
+    name: "Step 4c: Check Sufficiency"
+    op: if
+    cond:
+      or:
+        - contains: ["{IsSufficient}", "true"]
+        - equals: ["{IsSufficient}", "true"]
+    then: "sufficient"
+    else: "insufficient"
+    outputs:
+      - name: SufficiencyStatus
+        from: value
+      - name: IsSufficientBool
+        from: boolean
+
+  - type: logic
+    exec: 53
+    id: increment_iteration
+    name: "Step 4d: Increment Iteration"
+    op: set
+    var: iteration
+    value: {"add": [{"var": "iteration"}, 1]}
+    outputs:
+      - name: CurrentIteration
+        from: value
+
+  - type: logic
+    exec: 54
+    id: check_max_iterations
+    name: "Step 4e: Check Max Iterations"
+    op: if
+    cond:
+      or:
+        - equals: ["{IsSufficientBool}", "True"]
+        - gte: [{"var": "iteration"}, 5]
+    then: "stop"
+    else: "continue"
+    outputs:
+      - name: LoopDecision
+        from: value
+
+  # ============================================================
+  # ステップ4f: 不足時の追加推論（ループバック）
+  # 品質不足かつ反復回数が5未満の場合のみ実行
+  # ============================================================
+  - type: ai
+    exec: 55
+    id: additional_inference
+    name: "Step 4f: Additional Inference for Missing Aspects"
+    run_if:
+      equals: ["{LoopDecision}", "continue"]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは不足部分を補完する専門家です。
+      
+      # タスク
+      前回の統合回答で不足していた観点について、追加の分析を行ってください。
+      
+      # 推論エフォートレベル: high（不足を補うため、詳細に分析）
+      
+      # 出力形式
+      <think>追加分析のプロセス</think>
+      <supplementary_answer>不足部分を補完する追加回答</supplementary_answer>
+    prompts:
+      - |
+        以下の不足部分について、追加の分析を行ってください。
+        
+        ═══════════════════════════════════════
+        【元の質問】
+        {question}
+        
+        【現在の統合回答】
+        {IntegratedAnswer}
+        
+        【不足している観点】
+        {MissingAspects}
+        
+        【改善提案】
+        {ImprovementSuggestions}
+        
+        【現在の反復回数】
+        {CurrentIteration} / 5
+        ═══════════════════════════════════════
+        
+        不足部分を詳細に分析し、補完してください。
+    outputs:
+      - name: SupplementaryAnswer
+        select: tag
+        tag: supplementary_answer
+      - name: SupplementaryThinking
+        select: tag
+        tag: think
+
+  # 追加推論の結果を統合
+  - type: ai
+    exec: 56
+    id: merge_supplementary
+    name: "Step 4g: Merge Supplementary Answer"
+    run_if:
+      equals: ["{LoopDecision}", "continue"]
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは回答を統合する専門家です。
+      
+      # タスク
+      既存の統合回答と追加回答をマージして、より完全な回答を作成してください。
+      
+      # 出力形式
+      <think>統合プロセス</think>
+      <merged_answer>統合された完全な回答</merged_answer>
+    prompts:
+      - |
+        以下の回答を統合してください。
+        
+        【既存の統合回答】
+        {IntegratedAnswer}
+        
+        【追加回答】
+        {SupplementaryAnswer}
+        
+        これらを論理的に統合し、より完全な回答を作成してください。
+    outputs:
+      - name: MergedAnswer
+        select: tag
+        tag: merged_answer
+      - name: MergeThinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        integrated_answer: MergedAnswer
+
+  # ============================================================
+  # ステップ5: 回答の総合化
+  # ============================================================
+  - type: ai
+    exec: 60
+    id: synthesize_answer
+    name: "Step 5: Synthesize Final Answer"
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは複数の推論サイクルから得られた回答を総合する専門家です。
+      
+      # タスク
+      統合された回答を最終的な形式に総合してください。
+      
+      ## 総合のポイント
+      1. **構造化**: 論理的な構造で整理
+      2. **明確化**: 曖昧な表現を排除
+      3. **完全性**: 質問のすべての側面に回答
+      4. **適切な詳細度**: 推論エフォートに応じた詳細度
+      
+      # 推論エフォートレベル: {ReasoningEffort}
+      
+      # 出力形式
+      <think>総合化のプロセス</think>
+      <synthesized_answer>総合された最終回答</synthesized_answer>
+    prompts:
+      - |
+        以下の統合回答を、最終的な形式に総合してください。
+        
+        ═══════════════════════════════════════
+        【元の質問】
+        {question}
+        
+        【質問分析】
+        - 質問タイプ: {QuestionType}
+        - 難易度: {DifficultyLevel}
+        - 推論エフォート: {ReasoningEffort}
+        - 使用した視点数: {ActualParallelCount}
+        - 反復回数: {CurrentIteration}
+        
+        【統合回答】
+        {integrated_answer}
+        
+        【品質スコア】
+        {QualityScore}
+        ═══════════════════════════════════════
+        
+        質問に対する最終的な総合回答を作成してください。
+    outputs:
+      - name: SynthesizedAnswer
+        select: tag
+        tag: synthesized_answer
+      - name: SynthesisThinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        synthesized_answer: SynthesizedAnswer
+
+  # ============================================================
+  # ステップ6: 回答の校正と最終回答の作成
+  # ============================================================
+  - type: ai
+    exec: 70
+    id: proofread_answer
+    name: "Step 6: Proofread and Finalize Answer"
+    model: qwen3
+    system_prompt: |
+      # 役割
+      あなたは回答の品質保証を担当する校正者です。
+      
+      # タスク
+      総合された回答を最終チェックし、ユーザーに提示する最終回答を作成してください。
+      
+      ## 校正のチェックポイント
+      1. **正確性**: 事実や論理に誤りがないか
+      2. **一貫性**: 回答全体で論理が一貫しているか
+      3. **明瞭性**: 表現が明確で理解しやすいか
+      4. **完全性**: 質問に対して完全に回答しているか
+      5. **冗長性**: 不必要な重複や冗長な表現がないか
+      
+      # 出力形式
+      <think>校正プロセスと修正点</think>
+      <final_answer>最終回答</final_answer>
+      <quality_assessment>品質評価の概要</quality_assessment>
+    prompts:
+      - |
+        以下の回答を校正し、最終回答を作成してください。
+        
+        ═══════════════════════════════════════
+        【元の質問】
+        {question}
+        
+        【総合回答】
+        {SynthesizedAnswer}
+        
+        【処理情報】
+        - 質問タイプ: {QuestionType}
+        - 難易度レベル: {DifficultyLevel}
+        - 推論エフォート: {ReasoningEffort}
+        - 使用した視点数: {ActualParallelCount}
+        - 反復回数: {CurrentIteration}
+        - 品質スコア: {QualityScore}
+        ═══════════════════════════════════════
+        
+        必要な修正を加え、ユーザーに提示する最終回答を作成してください。
+    outputs:
+      - name: FinalAnswer
+        select: tag
+        tag: final_answer
+      - name: QualityAssessment
+        select: tag
+        tag: quality_assessment
+      - name: ProofreadThinking
+        select: tag
+        tag: think
+    save_to:
+      vars:
+        final_answer: FinalAnswer
+
+  # ============================================================
+  # 結果の整形
+  # ============================================================
+  - type: python
+    exec: 80
+    id: format_result
+    name: "Format Final Result"
+    function: format_3d_scaling_result
+    code_path: ./examples/helpers/format_helpers.py
+    inputs:
+      original_question: "{question}"
+      question_type: "{QuestionType}"
+      difficulty_level: "{DifficultyLevel}"
+      reasoning_effort: "{ReasoningEffort}"
+      parallel_count: "{ActualParallelCount}"
+      iteration_count: "{CurrentIteration}"
+      quality_score: "{QualityScore}"
+      perspectives: "{Perspectives}"
+      collected_answers: "{CollectedAnswers}"
+      integrated_answer: "{integrated_answer}"
+      synthesized_answer: "{SynthesizedAnswer}"
+      final_answer: "{FinalAnswer}"
+      quality_assessment: "{QualityAssessment}"
+      analysis_thinking: "{AnalysisThinking}"
+      perspective_thinking: "{PerspectiveThinking}"
+      integration_thinking: "{IntegrationThinking}"
+      synthesis_thinking: "{SynthesisThinking}"
+      proofread_thinking: "{ProofreadThinking}"
+    outputs: [FormattedResult, ExecutionMetrics]
+    use_env: "global"
+    ctx_access: ["vars.read", "log"]
+
+  # ============================================================
+  # 終了ブロック
+  # ============================================================
+  - type: end
+    exec: 100
+    reason: "3d_scaling_completed"
+    exit_code: "success"
+    final:
+      # 主要な出力
+      - name: final_answer
+        value: "{FinalAnswer}"
+      - name: formatted_result
+        value: "{FormattedResult}"
+      
+      # 三次元スケーリングのメトリクス
+      - name: question_type
+        value: "{QuestionType}"
+      - name: difficulty_level
+        value: "{DifficultyLevel}"
+      - name: reasoning_effort
+        value: "{ReasoningEffort}"
+      - name: parallel_count
+        value: "{ActualParallelCount}"
+      - name: iteration_count
+        value: "{CurrentIteration}"
+      - name: quality_score
+        value: "{QualityScore}"
+      
+      # 中間結果
+      - name: analysis_summary
+        value: "{AnalysisSummary}"
+      - name: perspectives
+        value: "{Perspectives}"
+      - name: integrated_answer
+        value: "{integrated_answer}"
+      - name: quality_assessment
+        value: "{QualityAssessment}"
+      
+      # 実行メトリクス
+      - name: execution_metrics
+        value: "{ExecutionMetrics}"
+    final_mode: "map"
+    include_vars:
+      - iteration
+      - is_sufficient
+      - question_type
+      - difficulty_level
+      - reasoning_effort
+      - parallel_count
+      - quality_score
+
+# ============================================================
+# 実行コマンド例:
+# python -m sdg run \
+#   --yaml examples/3d_scaling_agent.yaml \
+#   --input examples/data/3d_scaling_input.jsonl \
+#   --output output/3d_scaling_result.jsonl \
+#   --save-intermediate
+# ============================================================
