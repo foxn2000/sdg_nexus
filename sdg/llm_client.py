@@ -1,13 +1,246 @@
 from __future__ import annotations
 import asyncio
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
+import httpx
 from openai import AsyncOpenAI
 from .utils import now_ms
 
 
 class LLMError(RuntimeError):
+    """LLM APIリクエスト中に発生したエラーを表すカスタム例外クラス。"""
+
     pass
+
+
+class SharedHttpTransport:
+    """
+    共有HTTPトランスポート層を管理するシングルトンクラス。
+
+    全てのLLMClientインスタンス間でHTTPコネクションプールを共有し、
+    HTTP/2多重化を利用してオーバーヘッドを低減する。
+
+    Attributes:
+        DEFAULT_MAX_CONNECTIONS: デフォルトの最大接続数
+        DEFAULT_MAX_KEEPALIVE_CONNECTIONS: デフォルトのKeep-Alive接続数
+        DEFAULT_KEEPALIVE_EXPIRY: デフォルトのKeep-Alive有効期限（秒）
+        DEFAULT_CONNECT_TIMEOUT: デフォルトの接続タイムアウト（秒）
+        DEFAULT_READ_TIMEOUT: デフォルトの読み取りタイムアウト（秒）
+        DEFAULT_WRITE_TIMEOUT: デフォルトの書き込みタイムアウト（秒）
+        DEFAULT_POOL_TIMEOUT: デフォルトのプールタイムアウト（秒）
+    """
+
+    # デフォルト設定値
+    DEFAULT_MAX_CONNECTIONS: ClassVar[int] = 100
+    DEFAULT_MAX_KEEPALIVE_CONNECTIONS: ClassVar[int] = 50
+    DEFAULT_KEEPALIVE_EXPIRY: ClassVar[float] = 30.0
+    DEFAULT_CONNECT_TIMEOUT: ClassVar[float] = 10.0
+    DEFAULT_READ_TIMEOUT: ClassVar[float] = 60.0
+    DEFAULT_WRITE_TIMEOUT: ClassVar[float] = 30.0
+    DEFAULT_POOL_TIMEOUT: ClassVar[float] = 10.0
+
+    _instance: ClassVar[Optional["SharedHttpTransport"]] = None
+    _lock: ClassVar[asyncio.Lock] = asyncio.Lock()
+
+    def __init__(
+        self,
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        max_keepalive_connections: int = DEFAULT_MAX_KEEPALIVE_CONNECTIONS,
+        keepalive_expiry: float = DEFAULT_KEEPALIVE_EXPIRY,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        read_timeout: float = DEFAULT_READ_TIMEOUT,
+        write_timeout: float = DEFAULT_WRITE_TIMEOUT,
+        pool_timeout: float = DEFAULT_POOL_TIMEOUT,
+        http2: bool = True,
+    ):
+        """
+        SharedHttpTransportを初期化する。
+
+        Args:
+            max_connections: 最大接続数（デフォルト: 100）
+            max_keepalive_connections: Keep-Alive接続の最大数（デフォルト: 50）
+            keepalive_expiry: Keep-Alive接続の有効期限（秒、デフォルト: 30.0）
+            connect_timeout: 接続タイムアウト（秒、デフォルト: 10.0）
+            read_timeout: 読み取りタイムアウト（秒、デフォルト: 60.0）
+            write_timeout: 書き込みタイムアウト（秒、デフォルト: 30.0）
+            pool_timeout: プールからの接続取得タイムアウト（秒、デフォルト: 10.0）
+            http2: HTTP/2を有効にするかどうか（デフォルト: True）
+        """
+        self._max_connections = max_connections
+        self._max_keepalive_connections = max_keepalive_connections
+        self._keepalive_expiry = keepalive_expiry
+        self._http2 = http2
+
+        # httpxのLimits設定
+        self._limits = httpx.Limits(
+            max_connections=max_connections,
+            max_keepalive_connections=max_keepalive_connections,
+            keepalive_expiry=keepalive_expiry,
+        )
+
+        # タイムアウト設定
+        self._timeout = httpx.Timeout(
+            connect=connect_timeout,
+            read=read_timeout,
+            write=write_timeout,
+            pool=pool_timeout,
+        )
+
+        # 遅延初期化のためNoneで初期化
+        self._transport: Optional[httpx.AsyncHTTPTransport] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+    @classmethod
+    async def get_instance(
+        cls,
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        max_keepalive_connections: int = DEFAULT_MAX_KEEPALIVE_CONNECTIONS,
+        keepalive_expiry: float = DEFAULT_KEEPALIVE_EXPIRY,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        read_timeout: float = DEFAULT_READ_TIMEOUT,
+        write_timeout: float = DEFAULT_WRITE_TIMEOUT,
+        pool_timeout: float = DEFAULT_POOL_TIMEOUT,
+        http2: bool = True,
+    ) -> "SharedHttpTransport":
+        """
+        SharedHttpTransportのシングルトンインスタンスを取得する。
+
+        Args:
+            max_connections: 最大接続数
+            max_keepalive_connections: Keep-Alive接続の最大数
+            keepalive_expiry: Keep-Alive接続の有効期限（秒）
+            connect_timeout: 接続タイムアウト（秒）
+            read_timeout: 読み取りタイムアウト（秒）
+            write_timeout: 書き込みタイムアウト（秒）
+            pool_timeout: プールからの接続取得タイムアウト（秒）
+            http2: HTTP/2を有効にするかどうか
+
+        Returns:
+            SharedHttpTransportのシングルトンインスタンス
+        """
+        if cls._instance is None:
+            async with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls(
+                        max_connections=max_connections,
+                        max_keepalive_connections=max_keepalive_connections,
+                        keepalive_expiry=keepalive_expiry,
+                        connect_timeout=connect_timeout,
+                        read_timeout=read_timeout,
+                        write_timeout=write_timeout,
+                        pool_timeout=pool_timeout,
+                        http2=http2,
+                    )
+        return cls._instance
+
+    @classmethod
+    def get_instance_sync(
+        cls,
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        max_keepalive_connections: int = DEFAULT_MAX_KEEPALIVE_CONNECTIONS,
+        keepalive_expiry: float = DEFAULT_KEEPALIVE_EXPIRY,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        read_timeout: float = DEFAULT_READ_TIMEOUT,
+        write_timeout: float = DEFAULT_WRITE_TIMEOUT,
+        pool_timeout: float = DEFAULT_POOL_TIMEOUT,
+        http2: bool = True,
+    ) -> "SharedHttpTransport":
+        """
+        SharedHttpTransportのシングルトンインスタンスを同期的に取得する。
+
+        非同期コンテキスト外から呼び出す場合に使用。
+
+        Args:
+            max_connections: 最大接続数
+            max_keepalive_connections: Keep-Alive接続の最大数
+            keepalive_expiry: Keep-Alive接続の有効期限（秒）
+            connect_timeout: 接続タイムアウト（秒）
+            read_timeout: 読み取りタイムアウト（秒）
+            write_timeout: 書き込みタイムアウト（秒）
+            pool_timeout: プールからの接続取得タイムアウト（秒）
+            http2: HTTP/2を有効にするかどうか
+
+        Returns:
+            SharedHttpTransportのシングルトンインスタンス
+        """
+        if cls._instance is None:
+            cls._instance = cls(
+                max_connections=max_connections,
+                max_keepalive_connections=max_keepalive_connections,
+                keepalive_expiry=keepalive_expiry,
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+                write_timeout=write_timeout,
+                pool_timeout=pool_timeout,
+                http2=http2,
+            )
+        return cls._instance
+
+    def get_transport(self) -> httpx.AsyncHTTPTransport:
+        """
+        共有HTTPトランスポートを取得する。
+
+        Returns:
+            HTTP/2対応のAsyncHTTPTransportインスタンス
+        """
+        if self._transport is None:
+            self._transport = httpx.AsyncHTTPTransport(
+                http2=self._http2,
+                limits=self._limits,
+            )
+        return self._transport
+
+    def get_http_client(self) -> httpx.AsyncClient:
+        """
+        共有HTTPクライアントを取得する。
+
+        Returns:
+            設定済みのAsyncClientインスタンス
+        """
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                transport=self.get_transport(),
+                timeout=self._timeout,
+                http2=self._http2,
+            )
+        return self._http_client
+
+    async def close(self) -> None:
+        """
+        HTTPクライアントとトランスポートをクローズする。
+
+        アプリケーション終了時に呼び出すことを推奨。
+        """
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+        if self._transport is not None:
+            await self._transport.aclose()
+            self._transport = None
+
+    @classmethod
+    async def close_instance(cls) -> None:
+        """
+        シングルトンインスタンスをクローズしてクリアする。
+        """
+        if cls._instance is not None:
+            await cls._instance.close()
+            cls._instance = None
+
+    @property
+    def is_http2_enabled(self) -> bool:
+        """HTTP/2が有効かどうかを返す。"""
+        return self._http2
+
+    @property
+    def limits(self) -> httpx.Limits:
+        """現在のLimits設定を返す。"""
+        return self._limits
+
+    @property
+    def timeout(self) -> httpx.Timeout:
+        """現在のTimeout設定を返す。"""
+        return self._timeout
 
 
 class BatchOptimizer:
@@ -49,6 +282,43 @@ class BatchOptimizer:
 
 
 class LLMClient:
+    """
+    LLM APIクライアント。
+
+    OpenAI互換のAPIサーバー（vLLM、SGLang、OpenAI等）と通信するための
+    非同期HTTPクライアント。共有HTTPトランスポートを使用することで、
+    コネクションプールを効率的に再利用し、HTTP/2多重化を活用できる。
+
+    Attributes:
+        api_root: APIのベースURL
+        api_key: API認証キー
+        organization: 組織ID（オプション）
+        extra_headers: 追加のHTTPヘッダー
+        timeout: リクエストタイムアウト（秒）
+        use_shared_transport: 共有トランスポートを使用するかどうか
+
+    Example:
+        # 標準的な使用方法（AsyncOpenAI SDK使用）
+        client = LLMClient(
+            base_url="http://localhost:8000",
+            api_key="your-api-key",
+            organization=None,
+            headers={},
+        )
+
+        # 共有HTTPトランスポートを使用（推奨：大規模並列処理時）
+        client = LLMClient(
+            base_url="http://localhost:8000",
+            api_key="your-api-key",
+            organization=None,
+            headers={},
+            use_shared_transport=True,
+        )
+    """
+
+    # クラスレベルの共有トランスポート参照
+    _shared_transport: ClassVar[Optional[SharedHttpTransport]] = None
+
     def __init__(
         self,
         *,
@@ -57,7 +327,22 @@ class LLMClient:
         organization: Optional[str],
         headers: Dict[str, str],
         timeout_sec: Optional[float] = None,
+        use_shared_transport: bool = False,
+        http2: bool = True,
     ):
+        """
+        LLMClientを初期化する。
+
+        Args:
+            base_url: APIのベースURL（例：http://localhost:8000）
+            api_key: API認証キー
+            organization: 組織ID（オプション）
+            headers: 追加のHTTPヘッダー
+            timeout_sec: リクエストタイムアウト（秒、デフォルト: 60.0）
+            use_shared_transport: 共有HTTPトランスポートを使用するかどうか
+                                  （デフォルト: False、後方互換性のため）
+            http2: HTTP/2を有効にするかどうか（use_shared_transport=True時のみ有効）
+        """
         base = (base_url or "https://api.openai.com").rstrip("/")
         if base.endswith("/v1"):
             self.api_root = base
@@ -65,6 +350,8 @@ class LLMClient:
             self.api_root = base + "/v1"
         self.api_key = api_key
         self.organization = organization
+        self.use_shared_transport = use_shared_transport
+        self._http2 = http2
 
         # Keep user-provided headers, but avoid duplicating standard headers that the SDK manages.
         custom_headers = dict(headers or {})
@@ -74,13 +361,67 @@ class LLMClient:
 
         self.timeout = timeout_sec or 60.0
 
-        # Initialize AsyncOpenAI client configured for OpenAI-compatible servers
-        self.client = AsyncOpenAI(
-            base_url=self.api_root,
-            api_key=self.api_key,
-            organization=self.organization,
-            timeout=self.timeout,
-        )
+        # 共有トランスポートの初期化または取得
+        if use_shared_transport:
+            self._init_shared_transport()
+
+        # AsyncOpenAI クライアントを初期化
+        # 共有トランスポート使用時はhttpxクライアントを注入
+        if use_shared_transport and LLMClient._shared_transport is not None:
+            # 共有httpxクライアントを使用するAsyncOpenAIクライアントを作成
+            self.client = AsyncOpenAI(
+                base_url=self.api_root,
+                api_key=self.api_key,
+                organization=self.organization,
+                timeout=self.timeout,
+                http_client=LLMClient._shared_transport.get_http_client(),
+            )
+        else:
+            # 標準のAsyncOpenAIクライアント
+            self.client = AsyncOpenAI(
+                base_url=self.api_root,
+                api_key=self.api_key,
+                organization=self.organization,
+                timeout=self.timeout,
+            )
+
+    def _init_shared_transport(self) -> None:
+        """
+        共有HTTPトランスポートを初期化または取得する。
+
+        クラスレベルでシングルトンとして管理される。
+        """
+        if LLMClient._shared_transport is None:
+            LLMClient._shared_transport = SharedHttpTransport.get_instance_sync(
+                http2=self._http2,
+                read_timeout=self.timeout,
+            )
+
+    @classmethod
+    async def close_shared_transport(cls) -> None:
+        """
+        共有HTTPトランスポートをクローズする。
+
+        アプリケーション終了時に呼び出すことを推奨。
+        全てのLLMClientインスタンスで共有されているため、
+        全てのリクエストが完了してから呼び出すこと。
+        """
+        if cls._shared_transport is not None:
+            await cls._shared_transport.close()
+            cls._shared_transport = None
+        # SharedHttpTransportのシングルトンもクリア
+        await SharedHttpTransport.close_instance()
+
+    @classmethod
+    def get_shared_transport(cls) -> Optional[SharedHttpTransport]:
+        """
+        共有HTTPトランスポートを取得する。
+
+        Returns:
+            共有トランスポートが存在する場合はそのインスタンス、
+            存在しない場合はNone
+        """
+        return cls._shared_transport
 
     async def _one_chat(
         self,

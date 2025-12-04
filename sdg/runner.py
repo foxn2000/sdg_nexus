@@ -1,6 +1,15 @@
 from __future__ import annotations
-import asyncio, csv, json, os, sys
-from typing import Any, Dict, Iterable, List, Optional
+import asyncio
+import csv
+import json
+import os
+import sys
+import time
+from typing import Any, Callable, ClassVar, Dict, Iterable, List, Optional
+
+import aiofiles
+import aiofiles.os
+
 from .config import load_config
 from .executors import (
     run_pipeline,
@@ -11,17 +20,346 @@ from .executors import (
 )
 
 
+class AsyncBufferedWriter:
+    """
+    非同期バッファリングファイルライター。
+
+    aiofilesを使用して非同期でファイルに書き込み、バッファリングによって
+    I/O操作を最適化する。定期的なフラッシュと一定件数到達時のフラッシュを
+    両方サポートし、堅牢なフォールバック処理を提供する。
+
+    Attributes:
+        DEFAULT_BUFFER_SIZE: デフォルトのバッファサイズ（件数）
+        DEFAULT_FLUSH_INTERVAL: デフォルトのフラッシュ間隔（秒）
+        DEFAULT_MAX_RETRIES: デフォルトの最大リトライ回数
+
+    Example:
+        async with AsyncBufferedWriter("output.jsonl") as writer:
+            await writer.write({"key": "value"})
+            # バッファが閾値に達するか、定期フラッシュ時に自動書き込み
+    """
+
+    DEFAULT_BUFFER_SIZE: ClassVar[int] = 100
+    DEFAULT_FLUSH_INTERVAL: ClassVar[float] = 5.0
+    DEFAULT_MAX_RETRIES: ClassVar[int] = 3
+
+    def __init__(
+        self,
+        path: str,
+        buffer_size: int = DEFAULT_BUFFER_SIZE,
+        flush_interval: float = DEFAULT_FLUSH_INTERVAL,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        encoding: str = "utf-8",
+        serializer: Optional[Callable[[Dict[str, Any]], str]] = None,
+    ):
+        """
+        AsyncBufferedWriterを初期化する。
+
+        Args:
+            path: 出力ファイルパス
+            buffer_size: バッファサイズ（件数、デフォルト: 100）
+                        この件数に達するとバッファをフラッシュする
+            flush_interval: 定期フラッシュ間隔（秒、デフォルト: 5.0）
+                           この間隔ごとにバッファをフラッシュする
+            max_retries: 書き込み失敗時の最大リトライ回数（デフォルト: 3）
+            encoding: ファイルエンコーディング（デフォルト: utf-8）
+            serializer: カスタムシリアライザ関数（デフォルト: JSON）
+        """
+        self._path = path
+        self._buffer_size = buffer_size
+        self._flush_interval = flush_interval
+        self._max_retries = max_retries
+        self._encoding = encoding
+        self._serializer = serializer or self._default_serializer
+
+        # 内部状態
+        self._buffer: List[str] = []
+        self._lock = asyncio.Lock()
+        self._file: Optional[aiofiles.threadpool.binary.AsyncBufferedIOBase] = None
+        self._last_flush_time: float = 0.0
+        self._flush_task: Optional[asyncio.Task] = None
+        self._running = False
+        self._total_written: int = 0
+        self._total_errors: int = 0
+        self._fallback_buffer: List[str] = []  # フォールバック用バッファ
+
+    @staticmethod
+    def _default_serializer(data: Dict[str, Any]) -> str:
+        """デフォルトのJSONシリアライザ。"""
+        return json.dumps(data, ensure_ascii=False)
+
+    async def __aenter__(self) -> "AsyncBufferedWriter":
+        """非同期コンテキストマネージャーのエントリーポイント。"""
+        await self.open()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """非同期コンテキストマネージャーの終了ポイント。"""
+        await self.close()
+
+    async def open(self) -> None:
+        """
+        ファイルを開き、定期フラッシュタスクを開始する。
+        """
+        # ディレクトリを作成
+        dir_name = os.path.dirname(self._path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+
+        # ファイルを開く
+        self._file = await aiofiles.open(
+            self._path,
+            mode="w",
+            encoding=self._encoding,
+        )
+        self._last_flush_time = time.time()
+        self._running = True
+
+        # 定期フラッシュタスクを開始
+        self._flush_task = asyncio.create_task(self._periodic_flush_loop())
+
+    async def close(self) -> None:
+        """
+        残りのバッファをフラッシュし、ファイルを閉じる。
+        """
+        self._running = False
+
+        # 定期フラッシュタスクを停止
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+            self._flush_task = None
+
+        # 残りのバッファをフラッシュ
+        await self._flush_buffer()
+
+        # フォールバックバッファも書き込み
+        await self._flush_fallback_buffer()
+
+        # ファイルを閉じる
+        if self._file is not None:
+            await self._file.close()
+            self._file = None
+
+    async def write(self, data: Dict[str, Any]) -> bool:
+        """
+        データをバッファに追加する。
+
+        バッファサイズに達した場合は自動的にフラッシュする。
+
+        Args:
+            data: 書き込むデータ（辞書）
+
+        Returns:
+            書き込みに成功した場合はTrue、失敗した場合はFalse
+        """
+        try:
+            line = self._serializer(data) + "\n"
+        except Exception as e:
+            self._total_errors += 1
+            print(
+                f"Serialization error: {e}",
+                file=sys.stderr,
+            )
+            return False
+
+        async with self._lock:
+            self._buffer.append(line)
+
+            # バッファサイズチェック
+            if len(self._buffer) >= self._buffer_size:
+                await self._flush_buffer_unlocked()
+
+        return True
+
+    async def write_many(self, data_list: List[Dict[str, Any]]) -> int:
+        """
+        複数のデータをバッファに追加する。
+
+        Args:
+            data_list: 書き込むデータのリスト
+
+        Returns:
+            正常に追加されたデータの件数
+        """
+        success_count = 0
+        lines: List[str] = []
+
+        for data in data_list:
+            try:
+                line = self._serializer(data) + "\n"
+                lines.append(line)
+                success_count += 1
+            except Exception as e:
+                self._total_errors += 1
+                print(
+                    f"Serialization error: {e}",
+                    file=sys.stderr,
+                )
+
+        if lines:
+            async with self._lock:
+                self._buffer.extend(lines)
+
+                # バッファサイズチェック
+                if len(self._buffer) >= self._buffer_size:
+                    await self._flush_buffer_unlocked()
+
+        return success_count
+
+    async def flush(self) -> None:
+        """
+        バッファを強制的にフラッシュする。
+        """
+        async with self._lock:
+            await self._flush_buffer_unlocked()
+
+    async def _flush_buffer(self) -> None:
+        """ロック付きでバッファをフラッシュする。"""
+        async with self._lock:
+            await self._flush_buffer_unlocked()
+
+    async def _flush_buffer_unlocked(self) -> None:
+        """
+        バッファをファイルにフラッシュする（ロックなし）。
+
+        呼び出し元で_lockを取得していることを前提とする。
+        """
+        if not self._buffer:
+            return
+
+        if self._file is None:
+            # ファイルが開かれていない場合はフォールバックバッファに追加
+            self._fallback_buffer.extend(self._buffer)
+            self._buffer.clear()
+            return
+
+        # バッファの内容を結合
+        content = "".join(self._buffer)
+        buffer_count = len(self._buffer)
+
+        # リトライ付きで書き込み
+        success = False
+        for attempt in range(self._max_retries):
+            try:
+                await self._file.write(content)
+                await self._file.flush()
+                success = True
+                self._total_written += buffer_count
+                break
+            except Exception as e:
+                if attempt < self._max_retries - 1:
+                    # リトライ前に少し待機
+                    await asyncio.sleep(0.1 * (attempt + 1))
+                else:
+                    # 最大リトライ回数に達した場合
+                    self._total_errors += buffer_count
+                    print(
+                        f"Write error after {self._max_retries} attempts: {e}",
+                        file=sys.stderr,
+                    )
+                    # フォールバックバッファに追加
+                    self._fallback_buffer.extend(self._buffer)
+
+        if success:
+            self._buffer.clear()
+            self._last_flush_time = time.time()
+        else:
+            self._buffer.clear()  # エラーでもバッファはクリア（フォールバックに移動済み）
+
+    async def _flush_fallback_buffer(self) -> None:
+        """
+        フォールバックバッファをファイルに書き込む。
+
+        通常の書き込みが失敗した場合のデータ回復用。
+        """
+        if not self._fallback_buffer or self._file is None:
+            return
+
+        try:
+            content = "".join(self._fallback_buffer)
+            await self._file.write(content)
+            await self._file.flush()
+            self._total_written += len(self._fallback_buffer)
+            self._fallback_buffer.clear()
+        except Exception as e:
+            print(
+                f"Fallback buffer write error: {e}",
+                file=sys.stderr,
+            )
+
+    async def _periodic_flush_loop(self) -> None:
+        """定期フラッシュのバックグラウンドループ。"""
+        while self._running:
+            await asyncio.sleep(self._flush_interval)
+
+            if not self._running:
+                break
+
+            # 最後のフラッシュから十分な時間が経過している場合のみフラッシュ
+            if time.time() - self._last_flush_time >= self._flush_interval:
+                await self._flush_buffer()
+
+    @property
+    def total_written(self) -> int:
+        """書き込み成功した総件数を返す。"""
+        return self._total_written
+
+    @property
+    def total_errors(self) -> int:
+        """エラーとなった総件数を返す。"""
+        return self._total_errors
+
+    @property
+    def buffer_size(self) -> int:
+        """現在のバッファ内の件数を返す。"""
+        return len(self._buffer)
+
+    @property
+    def pending_count(self) -> int:
+        """フラッシュ待ちの総件数（バッファ+フォールバック）を返す。"""
+        return len(self._buffer) + len(self._fallback_buffer)
+
+
 def read_jsonl(path: str) -> List[Dict[str, Any]]:
+    """
+    JSONLファイルを読み込む。
+
+    Args:
+        path: 入力ファイルパス
+
+    Returns:
+        各行をパースした辞書のリスト
+    """
     with open(path, "r", encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
 
 
 def read_csv(path: str) -> List[Dict[str, Any]]:
+    """
+    CSVファイルを読み込む。
+
+    Args:
+        path: 入力ファイルパス
+
+    Returns:
+        各行を辞書に変換したリスト
+    """
     with open(path, "r", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
 def write_jsonl(path: str, rows: Iterable[Dict[str, Any]]) -> None:
+    """
+    JSONLファイルに書き込む（同期版）。
+
+    Args:
+        path: 出力ファイルパス
+        rows: 書き込むデータのイテラブル
+    """
     dir_name = os.path.dirname(path)
     if dir_name:
         os.makedirs(dir_name, exist_ok=True)
@@ -37,22 +375,38 @@ async def _run_streaming_async(
     max_concurrent: int,
     save_intermediate: bool,
     show_progress: bool = True,
+    buffer_size: int = AsyncBufferedWriter.DEFAULT_BUFFER_SIZE,
+    flush_interval: float = AsyncBufferedWriter.DEFAULT_FLUSH_INTERVAL,
 ):
-    """ストリーミング版パイプライン実行（非同期）"""
-    # 出力ディレクトリ作成
-    dir_name = os.path.dirname(output_path)
-    if dir_name:
-        os.makedirs(dir_name, exist_ok=True)
+    """
+    ストリーミング版パイプライン実行（非同期）。
 
-    # ファイル書き込み用ロック
-    write_lock = asyncio.Lock()
+    AsyncBufferedWriterを使用して非同期でファイルに書き込み、
+    バッファリングによるI/O最適化を行う。
 
+    Args:
+        cfg: パイプライン設定
+        dataset: 入力データセット
+        output_path: 出力ファイルパス
+        max_concurrent: 最大並行処理数
+        save_intermediate: 中間結果を保存するか
+        show_progress: 進捗表示を行うか
+        buffer_size: バッファサイズ（件数）
+        flush_interval: 定期フラッシュ間隔（秒）
+
+    Returns:
+        (完了数, エラー数) のタプル
+    """
     total = len(dataset)
     completed = 0
     errors = 0
 
-    # 出力ファイルを開く（追記モードではなく新規作成）
-    with open(output_path, "w", encoding="utf-8") as f:
+    # AsyncBufferedWriterを使用して非同期で書き込み
+    async with AsyncBufferedWriter(
+        output_path,
+        buffer_size=buffer_size,
+        flush_interval=flush_interval,
+    ) as writer:
         async for result in run_pipeline_streaming(
             cfg,
             dataset,
@@ -74,18 +428,14 @@ async def _run_streaming_async(
                     "_error": str(result.error),
                     **result.data,
                 }
-                async with write_lock:
-                    f.write(json.dumps(result_with_error, ensure_ascii=False) + "\n")
-                    f.flush()  # 即座にディスクに書き込み
+                await writer.write(result_with_error)
             else:
                 # 行インデックスを結果に含める（オプション）
                 result_data = {
                     "_row_index": result.row_index,
                     **result.data,
                 }
-                async with write_lock:
-                    f.write(json.dumps(result_data, ensure_ascii=False) + "\n")
-                    f.flush()  # 即座にディスクに書き込み
+                await writer.write(result_data)
 
                 if show_progress:
                     print(
@@ -117,22 +467,42 @@ async def _run_streaming_adaptive_async(
     metrics_type: str,
     save_intermediate: bool,
     show_progress: bool = True,
+    buffer_size: int = AsyncBufferedWriter.DEFAULT_BUFFER_SIZE,
+    flush_interval: float = AsyncBufferedWriter.DEFAULT_FLUSH_INTERVAL,
 ):
-    """適応的並行性制御付きストリーミング版パイプライン実行（非同期）"""
-    # 出力ディレクトリ作成
-    dir_name = os.path.dirname(output_path)
-    if dir_name:
-        os.makedirs(dir_name, exist_ok=True)
+    """
+    適応的並行性制御付きストリーミング版パイプライン実行（非同期）。
 
-    # ファイル書き込み用ロック
-    write_lock = asyncio.Lock()
+    AsyncBufferedWriterを使用して非同期でファイルに書き込み、
+    バッファリングによるI/O最適化を行う。
 
+    Args:
+        cfg: パイプライン設定
+        dataset: 入力データセット
+        output_path: 出力ファイルパス
+        max_concurrent: 最大並行処理数
+        min_concurrent: 最小並行処理数
+        target_latency_ms: 目標レイテンシ（ミリ秒）
+        target_queue_depth: 目標キュー深度
+        metrics_type: メトリクスタイプ
+        save_intermediate: 中間結果を保存するか
+        show_progress: 進捗表示を行うか
+        buffer_size: バッファサイズ（件数）
+        flush_interval: 定期フラッシュ間隔（秒）
+
+    Returns:
+        (完了数, エラー数) のタプル
+    """
     total = len(dataset)
     completed = 0
     errors = 0
 
-    # 出力ファイルを開く（追記モードではなく新規作成）
-    with open(output_path, "w", encoding="utf-8") as f:
+    # AsyncBufferedWriterを使用して非同期で書き込み
+    async with AsyncBufferedWriter(
+        output_path,
+        buffer_size=buffer_size,
+        flush_interval=flush_interval,
+    ) as writer:
         async for result in run_pipeline_streaming_adaptive(
             cfg,
             dataset,
@@ -158,17 +528,13 @@ async def _run_streaming_adaptive_async(
                     "_error": str(result.error),
                     **result.data,
                 }
-                async with write_lock:
-                    f.write(json.dumps(result_with_error, ensure_ascii=False) + "\n")
-                    f.flush()
+                await writer.write(result_with_error)
             else:
                 result_data = {
                     "_row_index": result.row_index,
                     **result.data,
                 }
-                async with write_lock:
-                    f.write(json.dumps(result_data, ensure_ascii=False) + "\n")
-                    f.flush()
+                await writer.write(result_data)
 
                 if show_progress:
                     print(
@@ -202,22 +568,44 @@ async def _run_streaming_adaptive_batched_async(
     max_wait_ms: int,
     save_intermediate: bool,
     show_progress: bool = True,
+    buffer_size: int = AsyncBufferedWriter.DEFAULT_BUFFER_SIZE,
+    flush_interval: float = AsyncBufferedWriter.DEFAULT_FLUSH_INTERVAL,
 ):
-    """バッチング付き適応的並行性制御ストリーミング版パイプライン実行（非同期）"""
-    # 出力ディレクトリ作成
-    dir_name = os.path.dirname(output_path)
-    if dir_name:
-        os.makedirs(dir_name, exist_ok=True)
+    """
+    バッチング付き適応的並行性制御ストリーミング版パイプライン実行（非同期）。
 
-    # ファイル書き込み用ロック
-    write_lock = asyncio.Lock()
+    AsyncBufferedWriterを使用して非同期でファイルに書き込み、
+    バッファリングによるI/O最適化を行う。
 
+    Args:
+        cfg: パイプライン設定
+        dataset: 入力データセット
+        output_path: 出力ファイルパス
+        max_concurrent: 最大並行処理数
+        min_concurrent: 最小並行処理数
+        target_latency_ms: 目標レイテンシ（ミリ秒）
+        target_queue_depth: 目標キュー深度
+        metrics_type: メトリクスタイプ
+        max_batch_size: 最大バッチサイズ
+        max_wait_ms: バッチ形成の最大待機時間（ミリ秒）
+        save_intermediate: 中間結果を保存するか
+        show_progress: 進捗表示を行うか
+        buffer_size: バッファサイズ（件数）
+        flush_interval: 定期フラッシュ間隔（秒）
+
+    Returns:
+        (完了数, エラー数) のタプル
+    """
     total = len(dataset)
     completed = 0
     errors = 0
 
-    # 出力ファイルを開く
-    with open(output_path, "w", encoding="utf-8") as f:
+    # AsyncBufferedWriterを使用して非同期で書き込み
+    async with AsyncBufferedWriter(
+        output_path,
+        buffer_size=buffer_size,
+        flush_interval=flush_interval,
+    ) as writer:
         async for result in run_pipeline_streaming_adaptive_batched(
             cfg,
             dataset,
@@ -244,17 +632,13 @@ async def _run_streaming_adaptive_batched_async(
                     "_error": str(result.error),
                     **result.data,
                 }
-                async with write_lock:
-                    f.write(json.dumps(result_with_error, ensure_ascii=False) + "\n")
-                    f.flush()
+                await writer.write(result_with_error)
             else:
                 result_data = {
                     "_row_index": result.row_index,
                     **result.data,
                 }
-                async with write_lock:
-                    f.write(json.dumps(result_data, ensure_ascii=False) + "\n")
-                    f.flush()
+                await writer.write(result_data)
 
                 if show_progress:
                     print(

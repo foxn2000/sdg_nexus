@@ -1,3 +1,5 @@
 PyYAML>=6.0.1
 openai>=1.40.0
 tqdm>=4.66.0
+httpx[http2]>=0.25.0
+aiofiles>=23.2.0
