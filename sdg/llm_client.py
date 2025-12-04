@@ -433,11 +433,15 @@ class LLMClient:
         backoff = (retry_cfg or {}).get("backoff", {})
         delay_ms = int(backoff.get("initial_ms", 250))
         factor = float(backoff.get("factor", 2.0))
+        # 空返答リトライ機能（デフォルト: 有効）
+        retry_on_empty = (retry_cfg or {}).get("retry_on_empty", True)
+        max_empty_retries = int((retry_cfg or {}).get("max_empty_retries", 3))
 
         # Remove internal keys not supported by the SDK API
         req = {k: v for k, v in payload.items() if k not in ("retry", "timeout_sec")}
         per_req_timeout = payload.get("timeout_sec", None)
 
+        empty_retry_count = 0
         for i in range(max(1, attempts)):
             try:
                 resp = await self.client.chat.completions.create(
@@ -447,6 +451,16 @@ class LLMClient:
                     timeout=per_req_timeout or self.timeout,
                 )
                 content = resp.choices[0].message.content
+
+                # 空返答チェック: contentがNone、空文字列、またはwhitespaceのみの場合
+                if retry_on_empty and (content is None or not content.strip()):
+                    empty_retry_count += 1
+                    if empty_retry_count < max_empty_retries:
+                        await asyncio.sleep(delay_ms / 1000.0)
+                        delay_ms = int(delay_ms * factor)
+                        continue
+                    # max_empty_retriesを超えた場合はそのまま返す（エラーにはしない）
+
                 return content, None, now_ms() - t0
             except Exception as e:
                 # Try to classify retryable errors similar to original logic

@@ -85,6 +85,9 @@ Phase 2 最適化オプション:
   --memory-threshold-mb MEMORY_THRESHOLD_MB
                           メモリ使用量警告閾値（MB、デフォルト: 1024）
 
+LLMリトライオプション:
+  --no-retry-on-empty     空返答時のリトライを無効化（デフォルトは有効）
+
 最適化オプション:
   --use-shared-transport  共有HTTPトランスポートを使用（コネクションプール共有）
   --no-http2              HTTP/2を無効化（デフォルトは有効）
@@ -156,6 +159,7 @@ SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
                         ガベージコレクション実行間隔（デフォルト: 100）
   --memory-threshold-mb MEMORY_THRESHOLD_MB
                         メモリ使用量警告閾値（MB、デフォルト: 1024）
+  --no-retry-on-empty   空返答時のリトライを無効化（デフォルトは有効）
   --use-shared-transport
                         共有HTTPトランスポートを使用（コネクションプール共有）
   --no-http2            HTTP/2を無効化（デフォルトは有効）
@@ -303,6 +307,13 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Memory usage warning threshold in MB (default: 1024)",
     )
 
+    # LLM retry options
+    p.add_argument(
+        "--no-retry-on-empty",
+        action="store_true",
+        help="Disable retry on empty response (enabled by default)",
+    )
+
     # Optimization options
     p.add_argument(
         "--use-shared-transport",
@@ -382,6 +393,8 @@ def _execute_run(args):
                 show_progress=not args.no_progress,
                 use_shared_transport=args.use_shared_transport,
                 http2=not args.no_http2,
+                # LLM retry options
+                retry_on_empty=not args.no_retry_on_empty,
                 # Phase 2: Scheduling options
                 enable_scheduling=args.enable_scheduling,
                 max_pending_tasks=args.max_pending_tasks,
@@ -405,6 +418,8 @@ def _execute_run(args):
                 show_progress=not args.no_progress,
                 use_shared_transport=args.use_shared_transport,
                 http2=not args.no_http2,
+                # LLM retry options
+                retry_on_empty=not args.no_retry_on_empty,
                 # Phase 2: Scheduling options
                 enable_scheduling=args.enable_scheduling,
                 max_pending_tasks=args.max_pending_tasks,
@@ -425,6 +440,8 @@ def _execute_run(args):
             show_progress=not args.no_progress,
             use_shared_transport=args.use_shared_transport,
             http2=not args.no_http2,
+            # LLM retry options
+            retry_on_empty=not args.no_retry_on_empty,
             # Phase 2: Scheduling options
             enable_scheduling=args.enable_scheduling,
             max_pending_tasks=args.max_pending_tasks,

@@ -716,6 +716,8 @@ def run_streaming_adaptive_batched(
     show_progress: bool = True,
     use_shared_transport: bool = False,
     http2: bool = True,
+    # LLM retry options
+    retry_on_empty: bool = True,
     # Phase 2: Scheduling options
     enable_scheduling: bool = False,
     max_pending_tasks: int = 1000,
@@ -746,6 +748,7 @@ def run_streaming_adaptive_batched(
         show_progress: 進捗表示を行うか
         use_shared_transport: 共有HTTPトランスポートを使用するか
         http2: HTTP/2を有効にするか
+        retry_on_empty: 空返答時にリトライするか（デフォルト: True）
         enable_scheduling: 階層的タスクスケジューリングを有効化
         max_pending_tasks: 最大保留タスク数（スケジューリング有効時）
         chunk_size: データセット分割サイズ（スケジューリング有効時）
@@ -763,6 +766,7 @@ def run_streaming_adaptive_batched(
     cfg.optimization = {
         "use_shared_transport": use_shared_transport,
         "http2": http2,
+        "retry_on_empty": retry_on_empty,
     }
 
     # load data
@@ -811,6 +815,8 @@ def run_streaming_adaptive(
     show_progress: bool = True,
     use_shared_transport: bool = False,
     http2: bool = True,
+    # LLM retry options
+    retry_on_empty: bool = True,
     # Phase 2: Scheduling options
     enable_scheduling: bool = False,
     max_pending_tasks: int = 1000,
@@ -839,6 +845,7 @@ def run_streaming_adaptive(
         show_progress: 進捗表示を行うか
         use_shared_transport: 共有HTTPトランスポートを使用するか
         http2: HTTP/2を有効にするか
+        retry_on_empty: 空返答時にリトライするか（デフォルト: True）
         enable_scheduling: 階層的タスクスケジューリングを有効化
         max_pending_tasks: 最大保留タスク数（スケジューリング有効時）
         chunk_size: データセット分割サイズ（スケジューリング有効時）
@@ -856,6 +863,7 @@ def run_streaming_adaptive(
     cfg.optimization = {
         "use_shared_transport": use_shared_transport,
         "http2": http2,
+        "retry_on_empty": retry_on_empty,
     }
 
     # load data
@@ -898,6 +906,8 @@ def run_streaming(
     show_progress: bool = True,
     use_shared_transport: bool = False,
     http2: bool = True,
+    # LLM retry options
+    retry_on_empty: bool = True,
     # Phase 2: Scheduling options
     enable_scheduling: bool = False,
     max_pending_tasks: int = 1000,
@@ -924,6 +934,7 @@ def run_streaming(
         show_progress: 進捗表示を行うか
         use_shared_transport: 共有HTTPトランスポートを使用するか
         http2: HTTP/2を有効にするか
+        retry_on_empty: 空返答時にリトライするか（デフォルト: True）
         enable_scheduling: 階層的タスクスケジューリングを有効化
         max_pending_tasks: 最大保留タスク数（スケジューリング有効時）
         chunk_size: データセット分割サイズ（スケジューリング有効時）
@@ -943,6 +954,7 @@ def run_streaming(
     cfg.optimization = {
         "use_shared_transport": use_shared_transport,
         "http2": http2,
+        "retry_on_empty": retry_on_empty,
     }
 
     # load data

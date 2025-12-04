@@ -194,7 +194,11 @@ async def _execute_ai_block_single(
         req_params["response_format"] = {"type": "json_object"}
 
     # 単一チャット呼び出し
-    retry_cfg = req_params.get("retry")
+    retry_cfg = dict(req_params.get("retry") or {})
+    # 最適化オプションからretry_on_empty設定を取得
+    if hasattr(cfg, "optimization") and cfg.optimization:
+        retry_on_empty = cfg.optimization.get("retry_on_empty", True)
+        retry_cfg["retry_on_empty"] = retry_on_empty
     payload = {"model": model_def.api_model, "messages": msgs, **req_params}
     text, err, _ = await client._one_chat(payload, retry_cfg)
 

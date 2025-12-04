@@ -726,6 +726,15 @@ async def run_pipeline_streaming_adaptive_batched(
                                         "type": "json_object"
                                     }
 
+                                # 最適化オプションからretry_on_empty設定を取得してrequest_paramsに反映
+                                if hasattr(cfg, "optimization") and cfg.optimization:
+                                    retry_on_empty = cfg.optimization.get(
+                                        "retry_on_empty", True
+                                    )
+                                    retry_cfg = dict(req_params.get("retry") or {})
+                                    retry_cfg["retry_on_empty"] = retry_on_empty
+                                    req_params["retry"] = retry_cfg
+
                                 processor = await create_batch_processor(
                                     client, model_def.api_model, req_params
                                 )
@@ -1031,6 +1040,13 @@ async def run_pipeline(
                     # v2: JSONモード
                     if block.mode == "json":
                         req_params["response_format"] = {"type": "json_object"}
+
+                    # 最適化オプションからretry_on_empty設定を取得してrequest_paramsに反映
+                    if hasattr(cfg, "optimization") and cfg.optimization:
+                        retry_on_empty = cfg.optimization.get("retry_on_empty", True)
+                        retry_cfg = dict(req_params.get("retry") or {})
+                        retry_cfg["retry_on_empty"] = retry_on_empty
+                        req_params["retry"] = retry_cfg
 
                     # バッチ呼び出し
                     res, lats, errs = await client.batched_chat(
