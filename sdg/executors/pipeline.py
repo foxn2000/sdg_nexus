@@ -78,10 +78,17 @@ async def process_single_row(
     py_funcs = python_functions or {}
 
     for block in cfg.blocks:
-        # run_if評価
+        # グローバル変数をコンテキストに追加（run_if評価用）
+        extended_ctx = {
+            **exec_ctx.globals_const,
+            **exec_ctx.globals_vars,
+            **ctx,
+        }
+
+        # run_if評価（グローバル変数も参照可能）
         run_ok = True
         if block.run_if:
-            run_ok = _eval_cond(ctx, block.run_if, exec_ctx)
+            run_ok = _eval_cond(extended_ctx, block.run_if, exec_ctx)
 
         if not run_ok:
             continue
@@ -704,9 +711,16 @@ async def run_pipeline_streaming_adaptive_batched(
                 ctx = dict(row_data)
 
                 for block in cfg.blocks:
+                    # グローバル変数をコンテキストに追加（run_if評価用）
+                    extended_ctx = {
+                        **row_exec_ctx.globals_const,
+                        **row_exec_ctx.globals_vars,
+                        **ctx,
+                    }
+
                     run_ok = True
                     if block.run_if:
-                        run_ok = _eval_cond(ctx, block.run_if, row_exec_ctx)
+                        run_ok = _eval_cond(extended_ctx, block.run_if, row_exec_ctx)
 
                     if not run_ok:
                         continue
@@ -748,25 +762,28 @@ async def run_pipeline_streaming_adaptive_batched(
                                 )
                                 await batchers[model_key].start()
 
-                            # メッセージ構築
+                            # メッセージ構築（グローバル変数も参照可能）
                             msgs = []
                             if block.system_prompt:
                                 msgs.append(
                                     {
                                         "role": "system",
                                         "content": render_template(
-                                            block.system_prompt, ctx
+                                            block.system_prompt, extended_ctx
                                         ),
                                     }
                                 )
 
                             raw_user_content = "\n\n".join(
-                                [render_template(p, ctx) for p in (block.prompts or [])]
+                                [
+                                    render_template(p, extended_ctx)
+                                    for p in (block.prompts or [])
+                                ]
                             )
 
                             if has_image_placeholders(raw_user_content):
                                 multimodal_content = _build_multimodal_content(
-                                    raw_user_content, ctx, cfg, None
+                                    raw_user_content, extended_ctx, cfg, None
                                 )
                                 msgs.append(
                                     {"role": "user", "content": multimodal_content}
@@ -989,12 +1006,17 @@ async def run_pipeline(
     )
 
     for block in cfg.blocks:
-        # run_if評価
+        # run_if評価（グローバル変数も参照可能）
         run_flags = []
         for ctx in contexts:
+            extended_ctx = {
+                **exec_ctx.globals_const,
+                **exec_ctx.globals_vars,
+                **ctx,
+            }
             ok = True
             if block.run_if:
-                ok = _eval_cond(ctx, block.run_if, exec_ctx)
+                ok = _eval_cond(extended_ctx, block.run_if, exec_ctx)
             run_flags.append(ok)
 
         try:
@@ -1005,24 +1027,37 @@ async def run_pipeline(
                 for i, (run_ok, ctx) in enumerate(zip(run_flags, contexts)):
                     if not run_ok:
                         continue
+
+                    # グローバル変数をコンテキストに追加
+                    extended_ctx = {
+                        **exec_ctx.globals_const,
+                        **exec_ctx.globals_vars,
+                        **ctx,
+                    }
+
                     msgs = []
                     if block.system_prompt:
                         msgs.append(
                             {
                                 "role": "system",
-                                "content": render_template(block.system_prompt, ctx),
+                                "content": render_template(
+                                    block.system_prompt, extended_ctx
+                                ),
                             }
                         )
 
                     # プロンプト内に画像があるかチェック
                     raw_user_content = "\n\n".join(
-                        [render_template(p, ctx) for p in (block.prompts or [])]
+                        [
+                            render_template(p, extended_ctx)
+                            for p in (block.prompts or [])
+                        ]
                     )
 
                     # 画像プレースホルダーがある場合はマルチモーダルコンテンツを構築
                     if has_image_placeholders(raw_user_content):
                         multimodal_content = _build_multimodal_content(
-                            raw_user_content, ctx, cfg, None
+                            raw_user_content, extended_ctx, cfg, None
                         )
                         msgs.append({"role": "user", "content": multimodal_content})
                     else:

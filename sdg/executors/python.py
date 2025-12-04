@@ -79,20 +79,28 @@ def _execute_python_block_single(
     # v2: ctxオブジェクト
     py_ctx = PythonContext(exec_ctx, ctx)
 
+    # グローバル定数と変数をコンテキストに追加（Endブロックと同様）
+    # ローカルコンテキストが優先されるよう、最後に追加
+    extended_ctx = {
+        **exec_ctx.globals_const,
+        **exec_ctx.globals_vars,
+        **ctx,
+    }
+
     # 引数準備
     if isinstance(block.inputs, dict):
         # v2: キーワード引数（テンプレート展開をサポート）
         kwargs = {}
         for k, v in block.inputs.items():
             if isinstance(v, str):
-                # テンプレート形式の場合は展開
-                kwargs[k] = render_template(v, ctx)
+                # テンプレート形式の場合は展開（グローバル変数も参照可能）
+                kwargs[k] = render_template(v, extended_ctx)
             else:
                 kwargs[k] = v
         out = fn(py_ctx, **kwargs)
     else:
         # v1: 位置引数
-        args = [ctx.get(name) for name in (block.inputs or [])]
+        args = [extended_ctx.get(name) for name in (block.inputs or [])]
         out = fn(py_ctx, *args) if cfg.is_v2() else fn(*args)
 
     # 出力処理

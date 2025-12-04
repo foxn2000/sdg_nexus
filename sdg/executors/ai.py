@@ -160,25 +160,33 @@ async def _execute_ai_block_single(
     base_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """単一行のAIブロック実行"""
+    # グローバル定数と変数をコンテキストに追加
+    # ローカルコンテキストが優先されるよう、最後に追加
+    extended_ctx = {
+        **exec_ctx.globals_const,
+        **exec_ctx.globals_vars,
+        **ctx,
+    }
+
     # メッセージ構築
     msgs = []
     if block.system_prompt:
         msgs.append(
             {
                 "role": "system",
-                "content": render_template(block.system_prompt, ctx),
+                "content": render_template(block.system_prompt, extended_ctx),
             }
         )
 
     # プロンプト内に画像があるかチェック
     raw_user_content = "\n\n".join(
-        [render_template(p, ctx) for p in (block.prompts or [])]
+        [render_template(p, extended_ctx) for p in (block.prompts or [])]
     )
 
     # 画像プレースホルダーがある場合はマルチモーダルコンテンツを構築
     if has_image_placeholders(raw_user_content):
         multimodal_content = _build_multimodal_content(
-            raw_user_content, ctx, cfg, base_path
+            raw_user_content, extended_ctx, cfg, base_path
         )
         msgs.append({"role": "user", "content": multimodal_content})
     else:

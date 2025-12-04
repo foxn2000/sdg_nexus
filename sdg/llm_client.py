@@ -431,7 +431,7 @@ class LLMClient:
         t0 = now_ms()
         attempts = int((retry_cfg or {}).get("max_attempts", 1))
         backoff = (retry_cfg or {}).get("backoff", {})
-        delay_ms = int(backoff.get("initial_ms", 250))
+        initial_delay_ms = int(backoff.get("initial_ms", 250))
         factor = float(backoff.get("factor", 2.0))
         # 空返答リトライ機能（デフォルト: 有効）
         retry_on_empty = (retry_cfg or {}).get("retry_on_empty", True)
@@ -441,58 +441,74 @@ class LLMClient:
         req = {k: v for k, v in payload.items() if k not in ("retry", "timeout_sec")}
         per_req_timeout = payload.get("timeout_sec", None)
 
-        empty_retry_count = 0
-        for i in range(max(1, attempts)):
-            try:
-                resp = await self.client.chat.completions.create(
-                    **req,
-                    # pass through any additional vendor-specific headers if needed (e.g., OpenRouter, etc.)
-                    extra_headers=self.extra_headers if self.extra_headers else None,
-                    timeout=per_req_timeout or self.timeout,
-                )
-                content = resp.choices[0].message.content
+        # 空返答リトライ用の外側ループ
+        # 空返答リトライはエラーリトライとは独立して処理
+        for empty_retry_count in range(
+            max(1, max_empty_retries) if retry_on_empty else 1
+        ):
+            delay_ms = initial_delay_ms
 
-                # 空返答チェック: contentがNone、空文字列、またはwhitespaceのみの場合
-                if retry_on_empty and (content is None or not content.strip()):
-                    empty_retry_count += 1
-                    if empty_retry_count < max_empty_retries:
+            # エラーリトライ用の内側ループ
+            for i in range(max(1, attempts)):
+                try:
+                    resp = await self.client.chat.completions.create(
+                        **req,
+                        # pass through any additional vendor-specific headers if needed (e.g., OpenRouter, etc.)
+                        extra_headers=(
+                            self.extra_headers if self.extra_headers else None
+                        ),
+                        timeout=per_req_timeout or self.timeout,
+                    )
+                    content = resp.choices[0].message.content
+
+                    # 空返答チェック: contentがNone、空文字列、またはwhitespaceのみの場合
+                    if retry_on_empty and (content is None or not content.strip()):
+                        # まだ空返答リトライ回数が残っている場合はリトライ
+                        if empty_retry_count < max_empty_retries - 1:
+                            await asyncio.sleep(delay_ms / 1000.0)
+                            delay_ms = int(delay_ms * factor)
+                            break  # 内側ループを抜けて外側ループで再試行
+                        # max_empty_retriesを超えた場合はそのまま返す（エラーにはしない）
+                        return content, None, now_ms() - t0
+
+                    return content, None, now_ms() - t0
+                except Exception as e:
+                    # Try to classify retryable errors similar to original logic
+                    status = getattr(e, "status_code", None)
+                    retryable_status = {408, 409, 429, 500, 502, 503, 504}
+                    is_retryable = status in retryable_status
+
+                    # If status unknown, heuristic on error type/name for transient issues
+                    if not is_retryable and status is None:
+                        name = e.__class__.__name__.lower()
+                        msg = str(e).lower()
+                        if any(
+                            s in name
+                            for s in ["timeout", "rate", "connection", "server"]
+                        ) or any(
+                            s in msg
+                            for s in [
+                                "timeout",
+                                "rate limit",
+                                "temporarily",
+                                "retry",
+                                "connection",
+                                "server error",
+                            ]
+                        ):
+                            is_retryable = True
+
+                    if is_retryable and i < attempts - 1:
                         await asyncio.sleep(delay_ms / 1000.0)
                         delay_ms = int(delay_ms * factor)
                         continue
-                    # max_empty_retriesを超えた場合はそのまま返す（エラーにはしない）
 
-                return content, None, now_ms() - t0
-            except Exception as e:
-                # Try to classify retryable errors similar to original logic
-                status = getattr(e, "status_code", None)
-                retryable_status = {408, 409, 429, 500, 502, 503, 504}
-                is_retryable = status in retryable_status
-
-                # If status unknown, heuristic on error type/name for transient issues
-                if not is_retryable and status is None:
-                    name = e.__class__.__name__.lower()
-                    msg = str(e).lower()
-                    if any(
-                        s in name for s in ["timeout", "rate", "connection", "server"]
-                    ) or any(
-                        s in msg
-                        for s in [
-                            "timeout",
-                            "rate limit",
-                            "temporarily",
-                            "retry",
-                            "connection",
-                            "server error",
-                        ]
-                    ):
-                        is_retryable = True
-
-                if is_retryable and i < attempts - 1:
-                    await asyncio.sleep(delay_ms / 1000.0)
-                    delay_ms = int(delay_ms * factor)
-                    continue
-
-                return None, LLMError(str(e)), now_ms() - t0
+                    return None, LLMError(str(e)), now_ms() - t0
+            else:
+                # 内側ループが正常に完了した場合（breakで抜けなかった場合）
+                # これはエラーリトライが尽きた場合
+                continue
+            # breakで抜けた場合（空返答リトライ）は外側ループを続行
 
         return None, LLMError("Retry attempts exhausted"), now_ms() - t0
 
