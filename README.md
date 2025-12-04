@@ -34,6 +34,11 @@ This framework is designed with a focus on large-scale, high-speed, and stable u
   * JSONL and CSV format support in streaming and batch modes
 * **Robust Error Handling**
   * Flexible error handling with retry mechanisms
+* **Performance Optimization**
+  * Shared HTTP transport for connection pooling
+  * HTTP/2 support for improved throughput
+  * Asynchronous buffered I/O for efficient file operations
+  * Phase 2: Hierarchical task scheduling and memory optimization (see [Phase 2 Optimization Guide](docs/phase2_optimization.md))
 
 ---
 

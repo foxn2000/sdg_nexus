@@ -122,6 +122,38 @@ The adaptive controller uses an AIMD (Additive Increase Multiplicative Decrease)
 |--------|-------------|
 | `--save-intermediate` | Save intermediate results |
 
+### Optimization Options
+
+SDG provides optimization options for improved performance and resource efficiency:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--use-shared-transport` | false | Use shared HTTP transport (connection pooling) |
+| `--no-http2` | false | Disable HTTP/2 (enabled by default) |
+
+**Optimization Options Details:**
+
+- **`--use-shared-transport`**: Shares HTTP connection pools across multiple requests. This reduces the overhead of establishing new connections and improves performance, especially when processing many short requests.
+
+- **`--no-http2`**: By default, HTTP/2 is enabled. Use this flag to fall back to HTTP/1.1 if you have compatibility issues with certain backends or proxies.
+
+**Usage Examples:**
+
+```bash
+# Use shared transport for better connection efficiency
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
+  --use-shared-transport
+
+# Disable HTTP/2 to use HTTP/1.1
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
+  --no-http2
+
+# Combine adaptive concurrency control with optimization options
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
+  --adaptive --use-vllm-metrics \
+  --use-shared-transport
+```
+
 ### Legacy Mode
 
 For backward compatibility, execution without subcommands is also supported:
@@ -182,6 +214,64 @@ run_streaming(
     max_concurrent=8,
     save_intermediate=False,
     show_progress=True,
+)
+
+# Streaming execution with optimization options
+run_streaming(
+    yaml_path="examples/sdg_demo.yaml",
+    input_path="examples/data/input.jsonl",
+    output_path="output/result.jsonl",
+    max_concurrent=8,
+    save_intermediate=False,
+    show_progress=True,
+    use_shared_transport=True,  # Use shared HTTP transport
+    http2=True,                  # Enable HTTP/2 (default)
+)
+```
+
+### Adaptive Concurrency Execution
+
+```python
+from sdg.runner import run_streaming_adaptive
+
+# Execute with adaptive concurrency control
+run_streaming_adaptive(
+    yaml_path="examples/sdg_demo.yaml",
+    input_path="examples/data/input.jsonl",
+    output_path="output/result.jsonl",
+    max_concurrent=64,
+    min_concurrent=1,
+    target_latency_ms=2000,
+    target_queue_depth=32,
+    metrics_type="vllm",  # "none", "vllm", "sglang"
+    save_intermediate=False,
+    show_progress=True,
+    use_shared_transport=True,
+    http2=True,
+)
+```
+
+### Request Batching Execution
+
+```python
+from sdg.runner import run_streaming_adaptive_batched
+
+# Execute with request batching enabled
+run_streaming_adaptive_batched(
+    yaml_path="examples/sdg_demo.yaml",
+    input_path="examples/data/input.jsonl",
+    output_path="output/result.jsonl",
+    max_concurrent=64,
+    min_concurrent=1,
+    target_latency_ms=2000,
+    target_queue_depth=32,
+    metrics_type="vllm",
+    max_batch_size=32,
+    max_wait_ms=50,
+    save_intermediate=False,
+    show_progress=True,
+    use_shared_transport=True,
+    http2=True,
 )
 ```
 
@@ -521,6 +611,287 @@ await collector.stop()
 
 ---
 
+## Phase 2 Optimization
+
+SDG Nexus Phase 2 introduces advanced optimizations for scalability and memory efficiency. These features are **opt-in** and disabled by default, ensuring backward compatibility.
+
+### Hierarchical Task Scheduling
+
+Efficiently processes large datasets by dividing data into chunks and progressively generating/executing tasks.
+
+**Features:**
+- **Chunk-based data division**: Splits datasets into manageable chunks
+- **Limited pending tasks**: Controls memory usage by limiting queued tasks
+- **Minimized startup delay**: Processes begin immediately without generating all tasks upfront
+- **Efficient coordination**: Uses Python `Condition` for cooperative control
+
+**CLI Usage:**
+
+```bash
+# Enable hierarchical scheduling
+sdg run \
+  --yaml pipeline.yaml \
+  --input large_data.jsonl \
+  --output result.jsonl \
+  --enable-scheduling \
+  --max-pending-tasks 100 \
+  --chunk-size 50
+```
+
+**Python API Usage:**
+
+```python
+import asyncio
+from sdg.config import load_config
+from sdg.executors import run_pipeline_streaming
+
+async def main():
+    cfg = load_config("config.yaml")
+    dataset = [{"id": i, "text": f"sample_{i}"} for i in range(10000)]
+    
+    # Enable hierarchical scheduling
+    async for result in run_pipeline_streaming(
+        cfg,
+        dataset,
+        max_concurrent=16,
+        enable_scheduling=True,          # Enable scheduling
+        max_pending_tasks=100,            # Max pending tasks
+        chunk_size=50,                    # Chunk size
+    ):
+        if result.error:
+            print(f"Error in row {result.row_index}: {result.error}")
+        else:
+            print(f"Completed row {result.row_index}")
+
+asyncio.run(main())
+```
+
+**Configuration Parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enable_scheduling` | `False` | Enable hierarchical scheduling |
+| `max_pending_tasks` | `1000` | Maximum number of pending tasks (memory control) |
+| `chunk_size` | `100` | Dataset chunk size |
+
+### Memory Optimization
+
+#### Streaming Context Manager
+
+Manages contexts with LRU cache, automatically releasing completed contexts.
+
+**Features:**
+- **LRU cache**: Automatically evicts least recently used contexts
+- **Automatic memory release**: Clears contexts upon completion
+- **Reference counting**: Safe memory deallocation
+- **Optional memory monitoring**: Monitor memory usage with psutil
+
+**CLI Usage:**
+
+```bash
+# Enable memory optimization
+sdg run \
+  --yaml pipeline.yaml \
+  --input large_data.jsonl \
+  --output result.jsonl \
+  --enable-memory-optimization \
+  --max-cache-size 500 \
+  --enable-memory-monitoring
+```
+
+**Python API Usage:**
+
+```python
+async def main():
+    cfg = load_config("config.yaml")
+    dataset = [{"id": i} for i in range(50000)]
+    
+    # Enable memory optimization
+    async for result in run_pipeline_streaming(
+        cfg,
+        dataset,
+        max_concurrent=32,
+        enable_memory_optimization=True,  # Enable memory optimization
+        max_cache_size=500,               # Cache size
+        enable_memory_monitoring=True,    # Enable memory monitoring
+    ):
+        # Process...
+        pass
+```
+
+**Configuration Parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enable_memory_optimization` | `False` | Enable memory optimization |
+| `max_cache_size` | `500` | Maximum context cache size |
+| `enable_memory_monitoring` | `False` | Enable memory usage monitoring |
+
+#### Batch Mode Memory Release
+
+Progressive memory release is also available for traditional `run_pipeline` (batch mode).
+
+**Python API Usage:**
+
+```python
+async def main():
+    cfg = load_config("config.yaml")
+    dataset = [{"id": i} for i in range(10000)]
+    
+    # Enable memory optimization in batch mode
+    results = await run_pipeline(
+        cfg,
+        dataset,
+        enable_memory_optimization=True,  # Enable memory optimization
+        gc_interval=100,                  # GC execution interval
+        memory_threshold_mb=1024,         # Memory warning threshold (MB)
+    )
+```
+
+**Configuration Parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enable_memory_optimization` | `False` | Enable memory optimization |
+| `enable_memory_monitoring` | `False` | Enable memory usage monitoring |
+| `gc_interval` | `100` | Garbage collection interval (processed rows) |
+| `memory_threshold_mb` | `1024` | Memory usage warning threshold (MB) |
+
+### Integration with Adaptive Pipeline
+
+Hierarchical scheduling and memory optimization can be combined with adaptive concurrency control.
+
+**CLI Usage:**
+
+```bash
+# Enable all optimizations
+sdg run \
+  --yaml pipeline.yaml \
+  --input huge_data.jsonl \
+  --output result.jsonl \
+  --adaptive \
+  --min-batch 4 \
+  --max-batch 64 \
+  --target-latency-ms 2000 \
+  --use-vllm-metrics \
+  --enable-scheduling \
+  --max-pending-tasks 200 \
+  --chunk-size 100 \
+  --enable-memory-optimization \
+  --max-cache-size 1000
+```
+
+**Python API Usage:**
+
+```python
+from sdg.executors import run_pipeline_streaming_adaptive
+
+async def main():
+    cfg = load_config("config.yaml")
+    dataset = [{"id": i} for i in range(100000)]
+    
+    # Enable all optimizations
+    async for result in run_pipeline_streaming_adaptive(
+        cfg,
+        dataset,
+        # Adaptive control
+        max_concurrent=64,
+        min_concurrent=4,
+        target_latency_ms=2000,
+        metrics_type="vllm",
+        # Phase 2: Scheduling
+        enable_scheduling=True,
+        max_pending_tasks=200,
+        chunk_size=100,
+        # Phase 2: Memory optimization
+        enable_memory_optimization=True,
+        max_cache_size=1000,
+        enable_memory_monitoring=True,
+    ):
+        # Process...
+        pass
+```
+
+### Performance Guidelines
+
+#### Small Datasets (< 1,000 rows)
+
+```python
+# Scheduling: Disabled (overhead too high)
+enable_scheduling=False
+
+# Memory optimization: Disabled (not needed)
+enable_memory_optimization=False
+```
+
+#### Medium Datasets (1,000 - 10,000 rows)
+
+```python
+# Scheduling: Enabled
+enable_scheduling=True
+max_pending_tasks=100
+chunk_size=50
+
+# Memory optimization: Enabled
+enable_memory_optimization=True
+max_cache_size=500
+```
+
+#### Large Datasets (> 10,000 rows)
+
+```python
+# Scheduling: Enabled
+enable_scheduling=True
+max_pending_tasks=500
+chunk_size=200
+
+# Memory optimization: Enabled
+enable_memory_optimization=True
+max_cache_size=1000
+enable_memory_monitoring=True  # Enable memory monitoring
+gc_interval=100
+```
+
+### Tuning Tips
+
+1. **max_pending_tasks**:
+   - Too small: Throughput decreases
+   - Too large: Memory usage increases
+   - Recommended: 5-10x of `max_concurrent`
+
+2. **chunk_size**:
+   - Too small: Scheduling overhead increases
+   - Too large: Memory usage increases
+   - Recommended: 20-50% of `max_pending_tasks`
+
+3. **max_cache_size**:
+   - LRU cache size
+   - Recommended: 5-10% of dataset size
+
+### Troubleshooting
+
+**High Memory Usage:**
+1. Set `enable_memory_optimization=True`
+2. Reduce `max_cache_size`
+3. Reduce `gc_interval` (more frequent GC)
+4. Enable `enable_memory_monitoring=True` to monitor usage
+
+**Slow Processing:**
+1. Increase `max_concurrent`
+2. Increase `max_pending_tasks`
+3. Increase `chunk_size`
+4. Try `enable_scheduling=False` (for small datasets)
+
+**Out of Memory Errors:**
+1. Reduce `max_pending_tasks`
+2. Reduce `chunk_size`
+3. Reduce `max_cache_size`
+4. Set `enable_memory_optimization=True`
+
+For detailed implementation and API reference, see the [Phase 2 Optimization Guide](phase2_optimization.md).
+
+---
+
 ## Parsers
 
 SDG provides parsers for processing LLM outputs and input data.
@@ -717,6 +1088,37 @@ sdg run \
   --enable-request-batching \
   --max-batch 64 \
   --max-batch-size 32
+```
+
+### Example 7: High-Speed Execution with Optimization Options
+
+```bash
+# Maximize connection efficiency with shared HTTP transport
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --max-concurrent 16 \
+  --use-shared-transport
+
+# Combine adaptive concurrency control with optimization options
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --adaptive \
+  --use-vllm-metrics \
+  --min-batch 1 \
+  --max-batch 64 \
+  --use-shared-transport
+
+# Disable HTTP/2 for compatibility
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --max-concurrent 8 \
+  --no-http2
 ```
 
 ---
