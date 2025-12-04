@@ -18,6 +18,11 @@ from .core import ExecutionContext, _apply_outputs
 def _build_clients(cfg: SDGConfig) -> Dict[str, LLMClient]:
     """モデルクライアントを構築"""
     clients: Dict[str, LLMClient] = {}
+
+    # 最適化オプションの取得
+    use_shared_transport = cfg.optimization.get("use_shared_transport", False)
+    http2 = cfg.optimization.get("http2", True)
+
     for m in cfg.models:
         # 環境変数注入
         api_key = m.api_key
@@ -33,6 +38,8 @@ def _build_clients(cfg: SDGConfig) -> Dict[str, LLMClient]:
             organization=m.organization,
             headers=m.headers,
             timeout_sec=timeout,
+            use_shared_transport=use_shared_transport,
+            http2=http2,
         )
     return clients
 

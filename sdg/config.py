@@ -237,6 +237,8 @@ class SDGConfig:
     images: List[ImageDef] = field(default_factory=list)  # v2.1: 画像定義
     blocks: List[Block] = field(default_factory=list)
     connections: List[Connection] = field(default_factory=list)
+    # 最適化オプション
+    optimization: Dict[str, Any] = field(default_factory=dict)
 
     def model_by_name(self, name: str) -> ModelDef:
         for m in self.models:

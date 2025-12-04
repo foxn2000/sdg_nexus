@@ -122,6 +122,38 @@ sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
 |-----------|------|
 | `--save-intermediate` | 中間結果を保存する |
 
+### 最適化オプション
+
+SDGは高速化とリソース効率化のための最適化オプションを提供しています：
+
+| オプション | デフォルト | 説明 |
+|-----------|-----------|------|
+| `--use-shared-transport` | false | 共有HTTPトランスポートを使用（コネクションプール共有） |
+| `--no-http2` | false | HTTP/2を無効化（デフォルトは有効） |
+
+**最適化オプションの詳細:**
+
+- **`--use-shared-transport`**: 複数のリクエスト間でHTTPコネクションプールを共有します。これにより、新しいコネクションの確立のオーバーヘッドが削減され、特に多数の短いリクエストを処理する場合にパフォーマンスが向上します。
+
+- **`--no-http2`**: デフォルトではHTTP/2が有効になっています。このフラグを使用するとHTTP/1.1にフォールバックします。一部のバックエンドやプロキシとの互換性問題がある場合に使用します。
+
+**使用例:**
+
+```bash
+# 共有トランスポートを使用して接続効率を向上
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
+  --use-shared-transport
+
+# HTTP/2を無効化してHTTP/1.1を使用
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
+  --no-http2
+
+# 適応的並行性制御と最適化オプションを組み合わせ
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
+  --adaptive --use-vllm-metrics \
+  --use-shared-transport
+```
+
 ### レガシーモード
 
 後方互換性のため、サブコマンドなしでの実行もサポートしています:
@@ -182,6 +214,64 @@ run_streaming(
     max_concurrent=8,
     save_intermediate=False,
     show_progress=True,
+)
+
+# 最適化オプションを使用したストリーミング実行
+run_streaming(
+    yaml_path="examples/sdg_demo.yaml",
+    input_path="examples/data/input.jsonl",
+    output_path="output/result.jsonl",
+    max_concurrent=8,
+    save_intermediate=False,
+    show_progress=True,
+    use_shared_transport=True,  # 共有HTTPトランスポートを使用
+    http2=True,                  # HTTP/2を有効化（デフォルト）
+)
+```
+
+### 適応的並行性制御での実行
+
+```python
+from sdg.runner import run_streaming_adaptive
+
+# 適応的並行性制御で実行
+run_streaming_adaptive(
+    yaml_path="examples/sdg_demo.yaml",
+    input_path="examples/data/input.jsonl",
+    output_path="output/result.jsonl",
+    max_concurrent=64,
+    min_concurrent=1,
+    target_latency_ms=2000,
+    target_queue_depth=32,
+    metrics_type="vllm",  # "none", "vllm", "sglang"
+    save_intermediate=False,
+    show_progress=True,
+    use_shared_transport=True,
+    http2=True,
+)
+```
+
+### リクエストバッチングでの実行
+
+```python
+from sdg.runner import run_streaming_adaptive_batched
+
+# リクエストバッチングを有効化した実行
+run_streaming_adaptive_batched(
+    yaml_path="examples/sdg_demo.yaml",
+    input_path="examples/data/input.jsonl",
+    output_path="output/result.jsonl",
+    max_concurrent=64,
+    min_concurrent=1,
+    target_latency_ms=2000,
+    target_queue_depth=32,
+    metrics_type="vllm",
+    max_batch_size=32,
+    max_wait_ms=50,
+    save_intermediate=False,
+    show_progress=True,
+    use_shared_transport=True,
+    http2=True,
 )
 ```
 
@@ -717,6 +807,37 @@ sdg run \
   --enable-request-batching \
   --max-batch 64 \
   --max-batch-size 32
+```
+
+### 例7: 最適化オプションを使用した高速実行
+
+```bash
+# 共有HTTPトランスポートを使用して接続効率を最大化
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --max-concurrent 16 \
+  --use-shared-transport
+
+# 適応的並行性制御と最適化オプションを組み合わせ
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --adaptive \
+  --use-vllm-metrics \
+  --min-batch 1 \
+  --max-batch 64 \
+  --use-shared-transport
+
+# HTTP/2を無効化して互換性を確保
+sdg run \
+  --yaml pipeline.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --max-concurrent 8 \
+  --no-http2
 ```
 
 ---

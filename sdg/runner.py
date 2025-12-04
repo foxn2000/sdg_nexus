@@ -672,6 +672,8 @@ def run_streaming_adaptive_batched(
     max_wait_ms: int = 50,
     save_intermediate: bool = False,
     show_progress: bool = True,
+    use_shared_transport: bool = False,
+    http2: bool = True,
 ):
     """
     バッチング付き適応的並行性制御ストリーミング版パイプライン実行
@@ -692,12 +694,20 @@ def run_streaming_adaptive_batched(
         max_wait_ms: バッチ形成の最大待機時間 (ミリ秒、デフォルト: 50)
         save_intermediate: 中間結果を保存するか
         show_progress: 進捗表示を行うか
+        use_shared_transport: 共有HTTPトランスポートを使用するか
+        http2: HTTP/2を有効にするか
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
         元の順序が必要な場合は _row_index フィールドでソートすること。
     """
     cfg = load_config(yaml_path)
+
+    # 最適化オプションを設定
+    cfg.optimization = {
+        "use_shared_transport": use_shared_transport,
+        "http2": http2,
+    }
 
     # load data
     if input_path.endswith(".jsonl"):
@@ -737,6 +747,8 @@ def run_streaming_adaptive(
     metrics_type: str = "none",
     save_intermediate: bool = False,
     show_progress: bool = True,
+    use_shared_transport: bool = False,
+    http2: bool = True,
 ):
     """
     適応的並行性制御付きストリーミング版パイプライン実行
@@ -755,12 +767,20 @@ def run_streaming_adaptive(
         metrics_type: メトリクスタイプ ("none", "vllm", or "sglang")
         save_intermediate: 中間結果を保存するか
         show_progress: 進捗表示を行うか
+        use_shared_transport: 共有HTTPトランスポートを使用するか
+        http2: HTTP/2を有効にするか
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
         元の順序が必要な場合は _row_index フィールドでソートすること。
     """
     cfg = load_config(yaml_path)
+
+    # 最適化オプションを設定
+    cfg.optimization = {
+        "use_shared_transport": use_shared_transport,
+        "http2": http2,
+    }
 
     # load data
     if input_path.endswith(".jsonl"):
@@ -794,6 +814,8 @@ def run_streaming(
     max_concurrent: int = 8,
     save_intermediate: bool = False,
     show_progress: bool = True,
+    use_shared_transport: bool = False,
+    http2: bool = True,
 ):
     """
     ストリーミング版パイプライン実行
@@ -808,12 +830,20 @@ def run_streaming(
         max_concurrent: 同時処理行数の上限
         save_intermediate: 中間結果を保存するか
         show_progress: 進捗表示を行うか
+        use_shared_transport: 共有HTTPトランスポートを使用するか
+        http2: HTTP/2を有効にするか
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
         元の順序が必要な場合は _row_index フィールドでソートすること。
     """
     cfg = load_config(yaml_path)
+
+    # 最適化オプションを設定
+    cfg.optimization = {
+        "use_shared_transport": use_shared_transport,
+        "http2": http2,
+    }
 
     # load data
     if input_path.endswith(".jsonl"):

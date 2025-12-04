@@ -69,6 +69,10 @@ YAMLブループリントを入力データセットに対して実行
   --max-wait-ms MAX_WAIT_MS
                           バッチ形成の最大待機時間（ミリ秒、デフォルト: 50）
 
+最適化オプション:
+  --use-shared-transport  共有HTTPトランスポートを使用（コネクションプール共有）
+  --no-http2              HTTP/2を無効化（デフォルトは有効）
+
 例:
   # ストリーミングモード（デフォルト・固定並行数）
   sdg run --yaml config.yaml --input data.jsonl --output result.jsonl --max-concurrent 16
@@ -121,6 +125,9 @@ SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
                         バッチあたりの最大リクエスト数（デフォルト: 32）
   --max-wait-ms MAX_WAIT_MS
                         バッチ形成の最大待機時間（ミリ秒、デフォルト: 50）
+  --use-shared-transport
+                        共有HTTPトランスポートを使用（コネクションプール共有）
+  --no-http2            HTTP/2を無効化（デフォルトは有効）
 """
 
 
@@ -216,6 +223,18 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Max wait time for batch formation in ms (default: 50)",
     )
 
+    # Optimization options
+    p.add_argument(
+        "--use-shared-transport",
+        action="store_true",
+        help="Use shared HTTP transport (connection pooling)",
+    )
+    p.add_argument(
+        "--no-http2",
+        action="store_true",
+        help="Disable HTTP/2 (enabled by default)",
+    )
+
     # Legacy options (hidden, for backward compatibility)
     p.add_argument(
         "--batch-mode",
@@ -281,6 +300,8 @@ def _execute_run(args):
                 max_wait_ms=args.max_wait_ms,
                 save_intermediate=args.save_intermediate,
                 show_progress=not args.no_progress,
+                use_shared_transport=args.use_shared_transport,
+                http2=not args.no_http2,
             )
         else:
             run_streaming_adaptive(
@@ -294,6 +315,8 @@ def _execute_run(args):
                 metrics_type=metrics_type,
                 save_intermediate=args.save_intermediate,
                 show_progress=not args.no_progress,
+                use_shared_transport=args.use_shared_transport,
+                http2=not args.no_http2,
             )
     else:
         # Streaming mode: row-by-row processing with fixed concurrency (default)
@@ -304,6 +327,8 @@ def _execute_run(args):
             max_concurrent=max_concurrent,
             save_intermediate=args.save_intermediate,
             show_progress=not args.no_progress,
+            use_shared_transport=args.use_shared_transport,
+            http2=not args.no_http2,
         )
 
 
