@@ -24,6 +24,13 @@ from .core import (
 from .logic import _apply_logic_block
 from .python import _load_python_function, _execute_python_block_single
 from .ai import _execute_ai_block_single, _build_clients, _build_multimodal_content
+from .scheduling import (
+    HierarchicalTaskScheduler,
+    StreamingContextManager,
+    BatchProgressiveRelease,
+    SchedulerConfig,
+    MemoryConfig,
+)
 
 # Import adaptive components (optional dependency)
 try:
@@ -128,6 +135,14 @@ async def run_pipeline_streaming(
     *,
     max_concurrent: int = 8,
     save_intermediate: bool = False,
+    # Phase 2: スケジューリングオプション（デフォルト無効）
+    max_pending_tasks: int = 1000,
+    chunk_size: int = 100,
+    enable_scheduling: bool = False,
+    # Phase 2: メモリ最適化オプション（デフォルト無効）
+    max_cache_size: int = 500,
+    enable_memory_optimization: bool = False,
+    enable_memory_monitoring: bool = False,
 ):
     """
     ストリーミング版パイプライン - 完了した行から順次yield
@@ -137,6 +152,12 @@ async def run_pipeline_streaming(
         dataset: 入力データセット
         max_concurrent: 同時処理行数の上限
         save_intermediate: 中間結果を保存するか
+        max_pending_tasks: 最大保留タスク数（スケジューリング有効時）
+        chunk_size: データセット分割サイズ（スケジューリング有効時）
+        enable_scheduling: 階層的タスクスケジューリングを有効化
+        max_cache_size: コンテキストキャッシュの最大サイズ
+        enable_memory_optimization: メモリ最適化を有効化
+        enable_memory_monitoring: メモリ使用状況監視を有効化
 
     Yields:
         StreamingResult: 各行の処理結果
@@ -160,6 +181,22 @@ async def run_pipeline_streaming(
     # 処理完了カウンター
     completed = 0
     total = len(dataset)
+
+    # Phase 2: 階層的タスクスケジューラの初期化
+    scheduler_config = SchedulerConfig(
+        max_pending_tasks=max_pending_tasks,
+        chunk_size=chunk_size,
+        enable_scheduling=enable_scheduling,
+    )
+    scheduler = HierarchicalTaskScheduler(config=scheduler_config)
+
+    # Phase 2: ストリーミングコンテキストマネージャの初期化
+    memory_config = MemoryConfig(
+        max_cache_size=max_cache_size,
+        enable_memory_optimization=enable_memory_optimization,
+        enable_monitoring=enable_memory_monitoring,
+    )
+    ctx_manager = StreamingContextManager(config=memory_config)
 
     async def process_row(row_index: int, row_data: Dict[str, Any]):
         """1行を処理してキューに結果を入れる"""
@@ -192,18 +229,50 @@ async def run_pipeline_streaming(
                         error=e,
                     )
                 )
+            finally:
+                # Phase 2: スケジューラに完了を通知
+                if scheduler.is_enabled:
+                    await scheduler.mark_task_completed()
+                # Phase 2: コンテキストマネージャに完了を通知してメモリ解放
+                if ctx_manager.is_enabled:
+                    await ctx_manager.mark_completed(row_index)
 
-    # 全行のタスクを起動
-    tasks = [asyncio.create_task(process_row(i, row)) for i, row in enumerate(dataset)]
+    try:
+        if enable_scheduling:
+            # Phase 2: 階層的スケジューリングでタスクを段階的に起動
+            tasks = []
+            async for item in scheduler.schedule(dataset):
+                task = asyncio.create_task(process_row(item.index, item.data))
+                tasks.append(task)
 
-    # 完了した結果を順次yield
-    while completed < total:
-        result = await result_queue.get()
-        completed += 1
-        yield result
+            # 完了した結果を順次yield
+            while completed < total:
+                result = await result_queue.get()
+                completed += 1
+                yield result
 
-    # すべてのタスク完了を待機（エラー発生時の例外を伝播）
-    await asyncio.gather(*tasks)
+            # すべてのタスク完了を待機
+            await asyncio.gather(*tasks)
+        else:
+            # 従来の動作: 全行のタスクを一度に起動
+            tasks = [
+                asyncio.create_task(process_row(i, row))
+                for i, row in enumerate(dataset)
+            ]
+
+            # 完了した結果を順次yield
+            while completed < total:
+                result = await result_queue.get()
+                completed += 1
+                yield result
+
+            # すべてのタスク完了を待機（エラー発生時の例外を伝播）
+            await asyncio.gather(*tasks)
+
+    finally:
+        # Phase 2: リソース解放
+        if ctx_manager.is_enabled:
+            await ctx_manager.release_all()
 
 
 async def run_pipeline_streaming_adaptive(
@@ -216,6 +285,14 @@ async def run_pipeline_streaming_adaptive(
     target_queue_depth: int = 32,
     metrics_type: str = "none",
     save_intermediate: bool = False,
+    # Phase 2: スケジューリングオプション（デフォルト無効）
+    max_pending_tasks: int = 1000,
+    chunk_size: int = 100,
+    enable_scheduling: bool = False,
+    # Phase 2: メモリ最適化オプション（デフォルト無効）
+    max_cache_size: int = 500,
+    enable_memory_optimization: bool = False,
+    enable_memory_monitoring: bool = False,
 ):
     """
     適応的並行性制御付きストリーミング版パイプライン
@@ -232,6 +309,12 @@ async def run_pipeline_streaming_adaptive(
         target_queue_depth: 目標バックエンドキュー深度 (デフォルト: 32)
         metrics_type: メトリクスタイプ ("none", "vllm", "sglang")
         save_intermediate: 中間結果を保存するか
+        max_pending_tasks: 最大保留タスク数（スケジューリング有効時）
+        chunk_size: データセット分割サイズ（スケジューリング有効時）
+        enable_scheduling: 階層的タスクスケジューリングを有効化
+        max_cache_size: コンテキストキャッシュの最大サイズ
+        enable_memory_optimization: メモリ最適化を有効化
+        enable_memory_monitoring: メモリ使用状況監視を有効化
 
     Yields:
         StreamingResult: 各行の処理結果
@@ -243,6 +326,12 @@ async def run_pipeline_streaming_adaptive(
             dataset,
             max_concurrent=max_concurrent,
             save_intermediate=save_intermediate,
+            max_pending_tasks=max_pending_tasks,
+            chunk_size=chunk_size,
+            enable_scheduling=enable_scheduling,
+            max_cache_size=max_cache_size,
+            enable_memory_optimization=enable_memory_optimization,
+            enable_memory_monitoring=enable_memory_monitoring,
         ):
             yield result
         return
@@ -296,6 +385,22 @@ async def run_pipeline_streaming_adaptive(
 
     # メトリクス更新タスク
     metrics_update_task: Optional[asyncio.Task] = None
+
+    # Phase 2: 階層的タスクスケジューラの初期化
+    scheduler_config = SchedulerConfig(
+        max_pending_tasks=max_pending_tasks,
+        chunk_size=chunk_size,
+        enable_scheduling=enable_scheduling,
+    )
+    scheduler = HierarchicalTaskScheduler(config=scheduler_config)
+
+    # Phase 2: ストリーミングコンテキストマネージャの初期化
+    memory_config = MemoryConfig(
+        max_cache_size=max_cache_size,
+        enable_memory_optimization=enable_memory_optimization,
+        enable_monitoring=enable_memory_monitoring,
+    )
+    ctx_manager = StreamingContextManager(config=memory_config)
 
     async def update_metrics_loop():
         """バックエンドメトリクスを定期的にコントローラーに反映"""
@@ -357,27 +462,55 @@ async def run_pipeline_streaming_adaptive(
                         error=e,
                     )
                 )
+            finally:
+                # Phase 2: スケジューラに完了を通知
+                if scheduler.is_enabled:
+                    await scheduler.mark_task_completed()
+                # Phase 2: コンテキストマネージャに完了を通知してメモリ解放
+                if ctx_manager.is_enabled:
+                    await ctx_manager.mark_completed(row_index)
 
     try:
         # メトリクス収集を開始（有効な場合）
         if metrics_collector is not None:
             metrics_update_task = asyncio.create_task(update_metrics_loop())
 
-        # 全行のタスクを起動
-        tasks = [
-            asyncio.create_task(process_row(i, row)) for i, row in enumerate(dataset)
-        ]
+        if enable_scheduling:
+            # Phase 2: 階層的スケジューリングでタスクを段階的に起動
+            tasks = []
+            async for item in scheduler.schedule(dataset):
+                task = asyncio.create_task(process_row(item.index, item.data))
+                tasks.append(task)
 
-        # 完了した結果を順次yield
-        while completed < total:
-            result = await result_queue.get()
-            completed += 1
-            yield result
+            # 完了した結果を順次yield
+            while completed < total:
+                result = await result_queue.get()
+                completed += 1
+                yield result
 
-        # すべてのタスク完了を待機
-        await asyncio.gather(*tasks)
+            # すべてのタスク完了を待機
+            await asyncio.gather(*tasks)
+        else:
+            # 従来の動作: 全行のタスクを一度に起動
+            tasks = [
+                asyncio.create_task(process_row(i, row))
+                for i, row in enumerate(dataset)
+            ]
+
+            # 完了した結果を順次yield
+            while completed < total:
+                result = await result_queue.get()
+                completed += 1
+                yield result
+
+            # すべてのタスク完了を待機
+            await asyncio.gather(*tasks)
 
     finally:
+        # Phase 2: リソース解放
+        if ctx_manager.is_enabled:
+            await ctx_manager.release_all()
+
         # メトリクス収集を停止
         if metrics_update_task is not None:
             metrics_update_task.cancel()
@@ -399,6 +532,14 @@ async def run_pipeline_streaming_adaptive_batched(
     max_batch_size: int = 32,
     max_wait_ms: int = 50,
     save_intermediate: bool = False,
+    # Phase 2: スケジューリングオプション（デフォルト無効）
+    max_pending_tasks: int = 1000,
+    chunk_size: int = 100,
+    enable_scheduling: bool = False,
+    # Phase 2: メモリ最適化オプション（デフォルト無効）
+    max_cache_size: int = 500,
+    enable_memory_optimization: bool = False,
+    enable_memory_monitoring: bool = False,
 ):
     """
     適応的並行性制御付きストリーミング版パイプライン（バッチング有効）
@@ -417,6 +558,12 @@ async def run_pipeline_streaming_adaptive_batched(
         max_batch_size: 最大バッチサイズ (デフォルト: 32)
         max_wait_ms: バッチ形成の最大待機時間 (ミリ秒、デフォルト: 50)
         save_intermediate: 中間結果を保存するか
+        max_pending_tasks: 最大保留タスク数（スケジューリング有効時）
+        chunk_size: データセット分割サイズ（スケジューリング有効時）
+        enable_scheduling: 階層的タスクスケジューリングを有効化
+        max_cache_size: コンテキストキャッシュの最大サイズ
+        enable_memory_optimization: メモリ最適化を有効化
+        enable_memory_monitoring: メモリ使用状況監視を有効化
 
     Yields:
         StreamingResult: 各行の処理結果
@@ -432,6 +579,12 @@ async def run_pipeline_streaming_adaptive_batched(
             target_queue_depth=target_queue_depth,
             metrics_type=metrics_type,
             save_intermediate=save_intermediate,
+            max_pending_tasks=max_pending_tasks,
+            chunk_size=chunk_size,
+            enable_scheduling=enable_scheduling,
+            max_cache_size=max_cache_size,
+            enable_memory_optimization=enable_memory_optimization,
+            enable_memory_monitoring=enable_memory_monitoring,
         ):
             yield result
         return
@@ -477,6 +630,22 @@ async def run_pipeline_streaming_adaptive_batched(
 
     # モデルごとにバッチャーを作成
     batchers: Dict[str, AdaptiveRequestBatcher] = {}
+
+    # Phase 2: 階層的タスクスケジューラの初期化
+    scheduler_config = SchedulerConfig(
+        max_pending_tasks=max_pending_tasks,
+        chunk_size=chunk_size,
+        enable_scheduling=enable_scheduling,
+    )
+    scheduler = HierarchicalTaskScheduler(config=scheduler_config)
+
+    # Phase 2: ストリーミングコンテキストマネージャの初期化
+    memory_config = MemoryConfig(
+        max_cache_size=max_cache_size,
+        enable_memory_optimization=enable_memory_optimization,
+        enable_monitoring=enable_memory_monitoring,
+    )
+    ctx_manager = StreamingContextManager(config=memory_config)
 
     async def create_batch_processor(
         client: LLMClient, model_api_name: str, req_params: Dict[str, Any]
@@ -690,28 +859,55 @@ async def run_pipeline_streaming_adaptive_batched(
                         error=e,
                     )
                 )
+            finally:
+                # Phase 2: スケジューラに完了を通知
+                if scheduler.is_enabled:
+                    await scheduler.mark_task_completed()
+                # Phase 2: コンテキストマネージャに完了を通知してメモリ解放
+                if ctx_manager.is_enabled:
+                    await ctx_manager.mark_completed(row_index)
 
     try:
         # メトリクス収集を開始
         if metrics_collector is not None:
             metrics_update_task = asyncio.create_task(update_metrics_loop())
 
-        # 全行のタスクを起動
-        tasks = [
-            asyncio.create_task(process_row_batched(i, row))
-            for i, row in enumerate(dataset)
-        ]
+        if enable_scheduling:
+            # Phase 2: 階層的スケジューリングでタスクを段階的に起動
+            tasks = []
+            async for item in scheduler.schedule(dataset):
+                task = asyncio.create_task(process_row_batched(item.index, item.data))
+                tasks.append(task)
 
-        # 完了した結果を順次yield
-        while completed < total:
-            result = await result_queue.get()
-            completed += 1
-            yield result
+            # 完了した結果を順次yield
+            while completed < total:
+                result = await result_queue.get()
+                completed += 1
+                yield result
 
-        # すべてのタスク完了を待機
-        await asyncio.gather(*tasks)
+            # すべてのタスク完了を待機
+            await asyncio.gather(*tasks)
+        else:
+            # 従来の動作: 全行のタスクを一度に起動
+            tasks = [
+                asyncio.create_task(process_row_batched(i, row))
+                for i, row in enumerate(dataset)
+            ]
+
+            # 完了した結果を順次yield
+            while completed < total:
+                result = await result_queue.get()
+                completed += 1
+                yield result
+
+            # すべてのタスク完了を待機
+            await asyncio.gather(*tasks)
 
     finally:
+        # Phase 2: リソース解放
+        if ctx_manager.is_enabled:
+            await ctx_manager.release_all()
+
         # バッチャーを停止
         for batcher in batchers.values():
             await batcher.stop()
@@ -733,8 +929,30 @@ async def run_pipeline(
     min_batch: int = 1,
     target_latency_ms: int = 3000,
     save_intermediate: bool = False,
+    # Phase 2: メモリ最適化オプション（デフォルト無効）
+    enable_memory_optimization: bool = False,
+    enable_memory_monitoring: bool = False,
+    gc_interval: int = 100,
+    memory_threshold_mb: int = 1024,
 ) -> List[Dict[str, Any]]:
-    """パイプライン実行（従来のブロック単位一括処理 - 後方互換性のため維持）"""
+    """
+    パイプライン実行（従来のブロック単位一括処理 - 後方互換性のため維持）
+
+    Args:
+        cfg: SDG設定
+        dataset: 入力データセット
+        max_batch: 最大バッチサイズ
+        min_batch: 最小バッチサイズ
+        target_latency_ms: 目標レイテンシ（ミリ秒）
+        save_intermediate: 中間結果を保存するか
+        enable_memory_optimization: メモリ最適化を有効化（デフォルト: False）
+        enable_memory_monitoring: メモリ使用状況監視を有効化（デフォルト: False）
+        gc_interval: ガベージコレクション実行間隔（処理行数）
+        memory_threshold_mb: メモリ使用量警告閾値（MB）
+
+    Returns:
+        処理結果のリスト
+    """
 
     # 実行コンテキスト
     exec_ctx = ExecutionContext(cfg)
@@ -747,6 +965,18 @@ async def run_pipeline(
 
     optimizer = BatchOptimizer(
         min_batch=min_batch, max_batch=max_batch, target_latency_ms=target_latency_ms
+    )
+
+    # Phase 2: バッチ処理用段階的メモリ解放
+    memory_config = MemoryConfig(
+        enable_memory_optimization=enable_memory_optimization,
+        enable_monitoring=enable_memory_monitoring,
+        gc_interval=gc_interval,
+        memory_threshold_mb=memory_threshold_mb,
+    )
+    progressive_release = BatchProgressiveRelease(
+        config=memory_config,
+        total_size=len(dataset),
     )
 
     for block in cfg.blocks:
@@ -870,6 +1100,10 @@ async def run_pipeline(
                     out_map = _execute_end_block_single(block, ctx, exec_ctx)
                     results[i].update(out_map)
 
+                    # Phase 2: Endブロック処理後にメモリを解放
+                    if progressive_release.is_enabled:
+                        progressive_release.mark_row_done(i, contexts)
+
             else:
                 raise ValueError(f"Unknown block class: {type(block)}")
 
@@ -880,5 +1114,9 @@ async def run_pipeline(
             for i, ok in enumerate(run_flags):
                 if ok:
                     contexts[i][f"error_block_{block.exec}"] = str(e)
+
+    # Phase 2: 最終的なガベージコレクション
+    if progressive_release.is_enabled:
+        progressive_release.force_gc()
 
     return results

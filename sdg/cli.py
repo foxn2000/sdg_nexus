@@ -69,6 +69,22 @@ YAMLブループリントを入力データセットに対して実行
   --max-wait-ms MAX_WAIT_MS
                           バッチ形成の最大待機時間（ミリ秒、デフォルト: 50）
 
+Phase 2 最適化オプション:
+  --enable-scheduling     階層的タスクスケジューリングを有効化（大規模データセット用）
+  --max-pending-tasks MAX_PENDING_TASKS
+                          最大保留タスク数（スケジューリング有効時、デフォルト: 1000）
+  --chunk-size CHUNK_SIZE データセット分割サイズ（スケジューリング有効時、デフォルト: 100）
+  --enable-memory-optimization
+                          メモリ最適化を有効化（LRUキャッシュによるコンテキスト管理）
+  --max-cache-size MAX_CACHE_SIZE
+                          コンテキストキャッシュの最大サイズ（デフォルト: 500）
+  --enable-memory-monitoring
+                          メモリ使用状況監視を有効化（psutilが必要）
+  --gc-interval GC_INTERVAL
+                          ガベージコレクション実行間隔（処理行数、デフォルト: 100）
+  --memory-threshold-mb MEMORY_THRESHOLD_MB
+                          メモリ使用量警告閾値（MB、デフォルト: 1024）
+
 最適化オプション:
   --use-shared-transport  共有HTTPトランスポートを使用（コネクションプール共有）
   --no-http2              HTTP/2を無効化（デフォルトは有効）
@@ -125,6 +141,21 @@ SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
                         バッチあたりの最大リクエスト数（デフォルト: 32）
   --max-wait-ms MAX_WAIT_MS
                         バッチ形成の最大待機時間（ミリ秒、デフォルト: 50）
+  --enable-scheduling   階層的タスクスケジューリングを有効化
+  --max-pending-tasks MAX_PENDING_TASKS
+                        最大保留タスク数（デフォルト: 1000）
+  --chunk-size CHUNK_SIZE
+                        データセット分割サイズ（デフォルト: 100）
+  --enable-memory-optimization
+                        メモリ最適化を有効化
+  --max-cache-size MAX_CACHE_SIZE
+                        コンテキストキャッシュの最大サイズ（デフォルト: 500）
+  --enable-memory-monitoring
+                        メモリ使用状況監視を有効化
+  --gc-interval GC_INTERVAL
+                        ガベージコレクション実行間隔（デフォルト: 100）
+  --memory-threshold-mb MEMORY_THRESHOLD_MB
+                        メモリ使用量警告閾値（MB、デフォルト: 1024）
   --use-shared-transport
                         共有HTTPトランスポートを使用（コネクションプール共有）
   --no-http2            HTTP/2を無効化（デフォルトは有効）
@@ -223,6 +254,55 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Max wait time for batch formation in ms (default: 50)",
     )
 
+    # Phase 2: Hierarchical scheduling options
+    p.add_argument(
+        "--enable-scheduling",
+        action="store_true",
+        help="Enable hierarchical task scheduling (for large datasets)",
+    )
+    p.add_argument(
+        "--max-pending-tasks",
+        type=int,
+        default=1000,
+        help="Max pending tasks (scheduling mode, default: 1000)",
+    )
+    p.add_argument(
+        "--chunk-size",
+        type=int,
+        default=100,
+        help="Dataset chunk size (scheduling mode, default: 100)",
+    )
+
+    # Phase 2: Memory optimization options
+    p.add_argument(
+        "--enable-memory-optimization",
+        action="store_true",
+        help="Enable memory optimization (LRU cache for context management)",
+    )
+    p.add_argument(
+        "--max-cache-size",
+        type=int,
+        default=500,
+        help="Max context cache size (default: 500)",
+    )
+    p.add_argument(
+        "--enable-memory-monitoring",
+        action="store_true",
+        help="Enable memory usage monitoring (requires psutil)",
+    )
+    p.add_argument(
+        "--gc-interval",
+        type=int,
+        default=100,
+        help="Garbage collection interval in rows (default: 100)",
+    )
+    p.add_argument(
+        "--memory-threshold-mb",
+        type=int,
+        default=1024,
+        help="Memory usage warning threshold in MB (default: 1024)",
+    )
+
     # Optimization options
     p.add_argument(
         "--use-shared-transport",
@@ -302,6 +382,14 @@ def _execute_run(args):
                 show_progress=not args.no_progress,
                 use_shared_transport=args.use_shared_transport,
                 http2=not args.no_http2,
+                # Phase 2: Scheduling options
+                enable_scheduling=args.enable_scheduling,
+                max_pending_tasks=args.max_pending_tasks,
+                chunk_size=args.chunk_size,
+                # Phase 2: Memory optimization options
+                enable_memory_optimization=args.enable_memory_optimization,
+                max_cache_size=args.max_cache_size,
+                enable_memory_monitoring=args.enable_memory_monitoring,
             )
         else:
             run_streaming_adaptive(
@@ -317,6 +405,14 @@ def _execute_run(args):
                 show_progress=not args.no_progress,
                 use_shared_transport=args.use_shared_transport,
                 http2=not args.no_http2,
+                # Phase 2: Scheduling options
+                enable_scheduling=args.enable_scheduling,
+                max_pending_tasks=args.max_pending_tasks,
+                chunk_size=args.chunk_size,
+                # Phase 2: Memory optimization options
+                enable_memory_optimization=args.enable_memory_optimization,
+                max_cache_size=args.max_cache_size,
+                enable_memory_monitoring=args.enable_memory_monitoring,
             )
     else:
         # Streaming mode: row-by-row processing with fixed concurrency (default)
@@ -329,6 +425,16 @@ def _execute_run(args):
             show_progress=not args.no_progress,
             use_shared_transport=args.use_shared_transport,
             http2=not args.no_http2,
+            # Phase 2: Scheduling options
+            enable_scheduling=args.enable_scheduling,
+            max_pending_tasks=args.max_pending_tasks,
+            chunk_size=args.chunk_size,
+            # Phase 2: Memory optimization options
+            enable_memory_optimization=args.enable_memory_optimization,
+            max_cache_size=args.max_cache_size,
+            enable_memory_monitoring=args.enable_memory_monitoring,
+            gc_interval=args.gc_interval,
+            memory_threshold_mb=args.memory_threshold_mb,
         )
 
 

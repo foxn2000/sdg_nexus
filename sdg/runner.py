@@ -377,6 +377,14 @@ async def _run_streaming_async(
     show_progress: bool = True,
     buffer_size: int = AsyncBufferedWriter.DEFAULT_BUFFER_SIZE,
     flush_interval: float = AsyncBufferedWriter.DEFAULT_FLUSH_INTERVAL,
+    # Phase 2: Scheduling options
+    enable_scheduling: bool = False,
+    max_pending_tasks: int = 1000,
+    chunk_size: int = 100,
+    # Phase 2: Memory optimization options
+    enable_memory_optimization: bool = False,
+    max_cache_size: int = 500,
+    enable_memory_monitoring: bool = False,
 ):
     """
     ストリーミング版パイプライン実行（非同期）。
@@ -412,6 +420,12 @@ async def _run_streaming_async(
             dataset,
             max_concurrent=max_concurrent,
             save_intermediate=save_intermediate,
+            enable_scheduling=enable_scheduling,
+            max_pending_tasks=max_pending_tasks,
+            chunk_size=chunk_size,
+            enable_memory_optimization=enable_memory_optimization,
+            max_cache_size=max_cache_size,
+            enable_memory_monitoring=enable_memory_monitoring,
         ):
             completed += 1
 
@@ -469,6 +483,14 @@ async def _run_streaming_adaptive_async(
     show_progress: bool = True,
     buffer_size: int = AsyncBufferedWriter.DEFAULT_BUFFER_SIZE,
     flush_interval: float = AsyncBufferedWriter.DEFAULT_FLUSH_INTERVAL,
+    # Phase 2: Scheduling options
+    enable_scheduling: bool = False,
+    max_pending_tasks: int = 1000,
+    chunk_size: int = 100,
+    # Phase 2: Memory optimization options
+    enable_memory_optimization: bool = False,
+    max_cache_size: int = 500,
+    enable_memory_monitoring: bool = False,
 ):
     """
     適応的並行性制御付きストリーミング版パイプライン実行（非同期）。
@@ -512,6 +534,12 @@ async def _run_streaming_adaptive_async(
             target_queue_depth=target_queue_depth,
             metrics_type=metrics_type,
             save_intermediate=save_intermediate,
+            enable_scheduling=enable_scheduling,
+            max_pending_tasks=max_pending_tasks,
+            chunk_size=chunk_size,
+            enable_memory_optimization=enable_memory_optimization,
+            max_cache_size=max_cache_size,
+            enable_memory_monitoring=enable_memory_monitoring,
         ):
             completed += 1
 
@@ -570,6 +598,14 @@ async def _run_streaming_adaptive_batched_async(
     show_progress: bool = True,
     buffer_size: int = AsyncBufferedWriter.DEFAULT_BUFFER_SIZE,
     flush_interval: float = AsyncBufferedWriter.DEFAULT_FLUSH_INTERVAL,
+    # Phase 2: Scheduling options
+    enable_scheduling: bool = False,
+    max_pending_tasks: int = 1000,
+    chunk_size: int = 100,
+    # Phase 2: Memory optimization options
+    enable_memory_optimization: bool = False,
+    max_cache_size: int = 500,
+    enable_memory_monitoring: bool = False,
 ):
     """
     バッチング付き適応的並行性制御ストリーミング版パイプライン実行（非同期）。
@@ -617,6 +653,12 @@ async def _run_streaming_adaptive_batched_async(
             max_batch_size=max_batch_size,
             max_wait_ms=max_wait_ms,
             save_intermediate=save_intermediate,
+            enable_scheduling=enable_scheduling,
+            max_pending_tasks=max_pending_tasks,
+            chunk_size=chunk_size,
+            enable_memory_optimization=enable_memory_optimization,
+            max_cache_size=max_cache_size,
+            enable_memory_monitoring=enable_memory_monitoring,
         ):
             completed += 1
 
@@ -674,6 +716,14 @@ def run_streaming_adaptive_batched(
     show_progress: bool = True,
     use_shared_transport: bool = False,
     http2: bool = True,
+    # Phase 2: Scheduling options
+    enable_scheduling: bool = False,
+    max_pending_tasks: int = 1000,
+    chunk_size: int = 100,
+    # Phase 2: Memory optimization options
+    enable_memory_optimization: bool = False,
+    max_cache_size: int = 500,
+    enable_memory_monitoring: bool = False,
 ):
     """
     バッチング付き適応的並行性制御ストリーミング版パイプライン実行
@@ -696,6 +746,12 @@ def run_streaming_adaptive_batched(
         show_progress: 進捗表示を行うか
         use_shared_transport: 共有HTTPトランスポートを使用するか
         http2: HTTP/2を有効にするか
+        enable_scheduling: 階層的タスクスケジューリングを有効化
+        max_pending_tasks: 最大保留タスク数（スケジューリング有効時）
+        chunk_size: データセット分割サイズ（スケジューリング有効時）
+        enable_memory_optimization: メモリ最適化を有効化
+        max_cache_size: コンテキストキャッシュの最大サイズ
+        enable_memory_monitoring: メモリ使用状況監視を有効化
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
@@ -732,6 +788,12 @@ def run_streaming_adaptive_batched(
             max_wait_ms=max_wait_ms,
             save_intermediate=save_intermediate,
             show_progress=show_progress,
+            enable_scheduling=enable_scheduling,
+            max_pending_tasks=max_pending_tasks,
+            chunk_size=chunk_size,
+            enable_memory_optimization=enable_memory_optimization,
+            max_cache_size=max_cache_size,
+            enable_memory_monitoring=enable_memory_monitoring,
         )
     )
 
@@ -749,6 +811,14 @@ def run_streaming_adaptive(
     show_progress: bool = True,
     use_shared_transport: bool = False,
     http2: bool = True,
+    # Phase 2: Scheduling options
+    enable_scheduling: bool = False,
+    max_pending_tasks: int = 1000,
+    chunk_size: int = 100,
+    # Phase 2: Memory optimization options
+    enable_memory_optimization: bool = False,
+    max_cache_size: int = 500,
+    enable_memory_monitoring: bool = False,
 ):
     """
     適応的並行性制御付きストリーミング版パイプライン実行
@@ -769,6 +839,12 @@ def run_streaming_adaptive(
         show_progress: 進捗表示を行うか
         use_shared_transport: 共有HTTPトランスポートを使用するか
         http2: HTTP/2を有効にするか
+        enable_scheduling: 階層的タスクスケジューリングを有効化
+        max_pending_tasks: 最大保留タスク数（スケジューリング有効時）
+        chunk_size: データセット分割サイズ（スケジューリング有効時）
+        enable_memory_optimization: メモリ最適化を有効化
+        max_cache_size: コンテキストキャッシュの最大サイズ
+        enable_memory_monitoring: メモリ使用状況監視を有効化
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
@@ -803,6 +879,12 @@ def run_streaming_adaptive(
             metrics_type=metrics_type,
             save_intermediate=save_intermediate,
             show_progress=show_progress,
+            enable_scheduling=enable_scheduling,
+            max_pending_tasks=max_pending_tasks,
+            chunk_size=chunk_size,
+            enable_memory_optimization=enable_memory_optimization,
+            max_cache_size=max_cache_size,
+            enable_memory_monitoring=enable_memory_monitoring,
         )
     )
 
@@ -816,6 +898,16 @@ def run_streaming(
     show_progress: bool = True,
     use_shared_transport: bool = False,
     http2: bool = True,
+    # Phase 2: Scheduling options
+    enable_scheduling: bool = False,
+    max_pending_tasks: int = 1000,
+    chunk_size: int = 100,
+    # Phase 2: Memory optimization options
+    enable_memory_optimization: bool = False,
+    max_cache_size: int = 500,
+    enable_memory_monitoring: bool = False,
+    gc_interval: int = 100,
+    memory_threshold_mb: int = 1024,
 ):
     """
     ストリーミング版パイプライン実行
@@ -832,6 +924,14 @@ def run_streaming(
         show_progress: 進捗表示を行うか
         use_shared_transport: 共有HTTPトランスポートを使用するか
         http2: HTTP/2を有効にするか
+        enable_scheduling: 階層的タスクスケジューリングを有効化
+        max_pending_tasks: 最大保留タスク数（スケジューリング有効時）
+        chunk_size: データセット分割サイズ（スケジューリング有効時）
+        enable_memory_optimization: メモリ最適化を有効化
+        max_cache_size: コンテキストキャッシュの最大サイズ
+        enable_memory_monitoring: メモリ使用状況監視を有効化
+        gc_interval: ガベージコレクション実行間隔（処理行数）
+        memory_threshold_mb: メモリ使用量警告閾値（MB）
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
@@ -862,6 +962,12 @@ def run_streaming(
             max_concurrent=max_concurrent,
             save_intermediate=save_intermediate,
             show_progress=show_progress,
+            enable_scheduling=enable_scheduling,
+            max_pending_tasks=max_pending_tasks,
+            chunk_size=chunk_size,
+            enable_memory_optimization=enable_memory_optimization,
+            max_cache_size=max_cache_size,
+            enable_memory_monitoring=enable_memory_monitoring,
         )
     )
 
