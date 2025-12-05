@@ -144,7 +144,10 @@ def _apply_outputs(text: str, outs: List[OutputDef]) -> Dict[str, Any]:
         if out.join_with is not None:
             d[out.name] = out.join_with.join(str(v) for v in vals)
         else:
-            d[out.name] = vals[0] if len(vals) == 1 else vals
+            # 常に最初の要素を文字列として返す（型の一貫性を保証）
+            # 複数の要素がある場合も最初の1つのみ使用
+            # これによりHuggingFaceなどでのスキーマ不整合を防ぐ
+            d[out.name] = str(vals[0]) if vals else ""
 
     return d
 

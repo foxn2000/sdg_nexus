@@ -2,6 +2,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -192,3 +193,155 @@ def is_image_data(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     return value.get("_type") == "image"
+
+
+# ============================================================
+# JSONLクリーニングユーティリティ
+# ============================================================
+
+
+def clean_jsonl_line(
+    line: str, line_num: int = 0, verbose: bool = False
+) -> Optional[str]:
+    """
+    1行のJSONLデータをクリーニングする
+
+    Args:
+        line: クリーニング対象の行
+        line_num: 行番号（エラー報告用）
+        verbose: 詳細なログを出力するか
+
+    Returns:
+        クリーニング済みのJSON文字列（パース可能な場合）、None（無効な場合）
+    """
+    # 空行をスキップ
+    line = line.strip()
+    if not line:
+        return None
+
+    # コメント行をスキップ（// or #で始まる行）
+    if line.startswith("//") or line.startswith("#"):
+        return None
+
+    # まずそのままパースを試みる
+    try:
+        obj = json.loads(line)
+        # パース成功したら、再度正規化されたJSONを返す
+        return json.dumps(obj, ensure_ascii=False)
+    except json.JSONDecodeError as e:
+        if verbose:
+            print(
+                f"[JSONL Cleaner] Line {line_num}: Initial parse failed: {e}",
+                file=sys.stderr,
+            )
+
+    # パースに失敗した場合、クリーニングを試みる
+    cleaned = line
+
+    # 1. 先頭・末尾の不要な文字を除去
+    cleaned = cleaned.strip()
+
+    # 2. Markdown コードブロックのマーカーを除去（```json, ```など）
+    cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+    cleaned = re.sub(r"\n?```$", "", cleaned)
+
+    # 3. 複数のJSONオブジェクトが1行に含まれている場合、最初のものだけを取得
+    # }{が連続している場合を検出
+    if "}{" in cleaned:
+        # 最初の完全なJSONオブジェクトを抽出しようとする
+        depth = 0
+        for i, char in enumerate(cleaned):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    cleaned = cleaned[: i + 1]
+                    break
+
+    # 4. 末尾のカンマを除去（JSONとして無効）
+    cleaned = re.sub(r",\s*}", "}", cleaned)
+    cleaned = re.sub(r",\s*]", "]", cleaned)
+
+    # 5. 不完全な文字列を修正しようとする（閉じていない引用符）
+    # この処理は複雑なので、基本的なケースのみ対応
+
+    # 再度パースを試みる
+    try:
+        obj = json.loads(cleaned)
+        if verbose:
+            print(
+                f"[JSONL Cleaner] Line {line_num}: Successfully cleaned",
+                file=sys.stderr,
+            )
+        return json.dumps(obj, ensure_ascii=False)
+    except json.JSONDecodeError as e:
+        if verbose:
+            print(
+                f"[JSONL Cleaner] Line {line_num}: Cleaning failed: {e}",
+                file=sys.stderr,
+            )
+            print(
+                f"[JSONL Cleaner] Line {line_num}: Content: {cleaned[:100]}...",
+                file=sys.stderr,
+            )
+        return None
+
+
+def clean_jsonl_content(content: str, verbose: bool = False) -> List[str]:
+    """
+    JSONL形式のコンテンツ全体をクリーニングする
+
+    Args:
+        content: クリーニング対象のJSONLコンテンツ（複数行）
+        verbose: 詳細なログを出力するか
+
+    Returns:
+        クリーニング済みのJSON文字列のリスト
+    """
+    lines = content.split("\n")
+    cleaned_lines = []
+    skipped = 0
+
+    for i, line in enumerate(lines, 1):
+        cleaned = clean_jsonl_line(line, line_num=i, verbose=verbose)
+        if cleaned is not None:
+            cleaned_lines.append(cleaned)
+        else:
+            if line.strip():  # 空行以外でスキップした場合
+                skipped += 1
+
+    if verbose and skipped > 0:
+        print(f"[JSONL Cleaner] Skipped {skipped} invalid lines", file=sys.stderr)
+
+    return cleaned_lines
+
+
+def clean_jsonl_file(
+    input_path: str, output_path: str, verbose: bool = False
+) -> Tuple[int, int]:
+    """
+    JSONLファイルをクリーニングして新しいファイルに書き出す
+
+    Args:
+        input_path: 入力JSONLファイルのパス
+        output_path: 出力JSONLファイルのパス
+        verbose: 詳細なログを出力するか
+
+    Returns:
+        (成功した行数, スキップした行数) のタプル
+    """
+    with open(input_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    cleaned_lines = clean_jsonl_content(content, verbose=verbose)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        for line in cleaned_lines:
+            f.write(line + "\n")
+
+    total_lines = len([l for l in content.split("\n") if l.strip()])
+    success_count = len(cleaned_lines)
+    skipped_count = total_lines - success_count
+
+    return success_count, skipped_count

@@ -88,6 +88,10 @@ Phase 2 最適化オプション:
 LLMリトライオプション:
   --no-retry-on-empty     空返答時のリトライを無効化（デフォルトは有効）
 
+JSONL出力クリーニングオプション:
+  --disable-output-cleaning
+                          出力JSONLのクリーニングを無効化（デフォルトは有効）
+
 最適化オプション:
   --use-shared-transport  共有HTTPトランスポートを使用（コネクションプール共有）
   --no-http2              HTTP/2を無効化（デフォルトは有効）
@@ -160,6 +164,8 @@ SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
   --memory-threshold-mb MEMORY_THRESHOLD_MB
                         メモリ使用量警告閾値（MB、デフォルト: 1024）
   --no-retry-on-empty   空返答時のリトライを無効化（デフォルトは有効）
+  --disable-output-cleaning
+                        出力JSONLのクリーニングを無効化（デフォルトは有効）
   --use-shared-transport
                         共有HTTPトランスポートを使用（コネクションプール共有）
   --no-http2            HTTP/2を無効化（デフォルトは有効）
@@ -314,6 +320,13 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Disable retry on empty response (enabled by default)",
     )
 
+    # JSONL cleaning options
+    p.add_argument(
+        "--disable-output-cleaning",
+        action="store_true",
+        help="Disable output JSONL cleaning (enabled by default)",
+    )
+
     # Optimization options
     p.add_argument(
         "--use-shared-transport",
@@ -395,6 +408,8 @@ def _execute_run(args):
                 http2=not args.no_http2,
                 # LLM retry options
                 retry_on_empty=not args.no_retry_on_empty,
+                # JSONL cleaning options
+                clean_output=not args.disable_output_cleaning,
                 # Phase 2: Scheduling options
                 enable_scheduling=args.enable_scheduling,
                 max_pending_tasks=args.max_pending_tasks,
@@ -420,6 +435,8 @@ def _execute_run(args):
                 http2=not args.no_http2,
                 # LLM retry options
                 retry_on_empty=not args.no_retry_on_empty,
+                # JSONL cleaning options
+                clean_output=not args.disable_output_cleaning,
                 # Phase 2: Scheduling options
                 enable_scheduling=args.enable_scheduling,
                 max_pending_tasks=args.max_pending_tasks,
@@ -442,6 +459,8 @@ def _execute_run(args):
             http2=not args.no_http2,
             # LLM retry options
             retry_on_empty=not args.no_retry_on_empty,
+            # JSONL cleaning options
+            clean_output=not args.disable_output_cleaning,
             # Phase 2: Scheduling options
             enable_scheduling=args.enable_scheduling,
             max_pending_tasks=args.max_pending_tasks,

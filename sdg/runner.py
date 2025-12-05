@@ -18,6 +18,7 @@ from .executors import (
     run_pipeline_streaming_adaptive_batched,
     StreamingResult,
 )
+from .utils import clean_jsonl_line
 
 
 class AsyncBufferedWriter:
@@ -51,6 +52,7 @@ class AsyncBufferedWriter:
         max_retries: int = DEFAULT_MAX_RETRIES,
         encoding: str = "utf-8",
         serializer: Optional[Callable[[Dict[str, Any]], str]] = None,
+        clean_output: bool = True,
     ):
         """
         AsyncBufferedWriterを初期化する。
@@ -64,6 +66,7 @@ class AsyncBufferedWriter:
             max_retries: 書き込み失敗時の最大リトライ回数（デフォルト: 3）
             encoding: ファイルエンコーディング（デフォルト: utf-8）
             serializer: カスタムシリアライザ関数（デフォルト: JSON）
+            clean_output: 出力をクリーニングするか（デフォルト: True）
         """
         self._path = path
         self._buffer_size = buffer_size
@@ -71,6 +74,7 @@ class AsyncBufferedWriter:
         self._max_retries = max_retries
         self._encoding = encoding
         self._serializer = serializer or self._default_serializer
+        self._clean_output = clean_output
 
         # 内部状態
         self._buffer: List[str] = []
@@ -81,6 +85,7 @@ class AsyncBufferedWriter:
         self._running = False
         self._total_written: int = 0
         self._total_errors: int = 0
+        self._total_cleaned: int = 0
         self._fallback_buffer: List[str] = []  # フォールバック用バッファ
 
     @staticmethod
@@ -157,7 +162,23 @@ class AsyncBufferedWriter:
             書き込みに成功した場合はTrue、失敗した場合はFalse
         """
         try:
-            line = self._serializer(data) + "\n"
+            line = self._serializer(data)
+
+            # クリーニングを適用
+            if self._clean_output:
+                cleaned = clean_jsonl_line(line, verbose=False)
+                if cleaned is None:
+                    self._total_errors += 1
+                    print(
+                        f"Cleaning error: Invalid JSON could not be cleaned",
+                        file=sys.stderr,
+                    )
+                    return False
+                line = cleaned
+                if line != self._serializer(data):
+                    self._total_cleaned += 1
+
+            line = line + "\n"
         except Exception as e:
             self._total_errors += 1
             print(
@@ -190,7 +211,23 @@ class AsyncBufferedWriter:
 
         for data in data_list:
             try:
-                line = self._serializer(data) + "\n"
+                line = self._serializer(data)
+
+                # クリーニングを適用
+                if self._clean_output:
+                    cleaned = clean_jsonl_line(line, verbose=False)
+                    if cleaned is None:
+                        self._total_errors += 1
+                        print(
+                            f"Cleaning error: Invalid JSON could not be cleaned",
+                            file=sys.stderr,
+                        )
+                        continue
+                    line = cleaned
+                    if line != self._serializer(data):
+                        self._total_cleaned += 1
+
+                line = line + "\n"
                 lines.append(line)
                 success_count += 1
             except Exception as e:
@@ -314,6 +351,11 @@ class AsyncBufferedWriter:
         return self._total_errors
 
     @property
+    def total_cleaned(self) -> int:
+        """クリーニングされた総件数を返す。"""
+        return self._total_cleaned
+
+    @property
     def buffer_size(self) -> int:
         """現在のバッファ内の件数を返す。"""
         return len(self._buffer)
@@ -377,6 +419,7 @@ async def _run_streaming_async(
     show_progress: bool = True,
     buffer_size: int = AsyncBufferedWriter.DEFAULT_BUFFER_SIZE,
     flush_interval: float = AsyncBufferedWriter.DEFAULT_FLUSH_INTERVAL,
+    clean_output: bool = True,
     # Phase 2: Scheduling options
     enable_scheduling: bool = False,
     max_pending_tasks: int = 1000,
@@ -401,6 +444,7 @@ async def _run_streaming_async(
         show_progress: 進捗表示を行うか
         buffer_size: バッファサイズ（件数）
         flush_interval: 定期フラッシュ間隔（秒）
+        clean_output: 出力をクリーニングするか
 
     Returns:
         (完了数, エラー数) のタプル
@@ -414,6 +458,7 @@ async def _run_streaming_async(
         output_path,
         buffer_size=buffer_size,
         flush_interval=flush_interval,
+        clean_output=clean_output,
     ) as writer:
         async for result in run_pipeline_streaming(
             cfg,
@@ -460,6 +505,11 @@ async def _run_streaming_async(
 
     if show_progress:
         print(file=sys.stderr)  # 最後に改行
+        if writer.total_cleaned > 0:
+            print(
+                f"[JSONL Cleaner] Cleaned {writer.total_cleaned} invalid JSON lines.",
+                file=sys.stderr,
+            )
         if errors > 0:
             print(
                 f"Completed with {errors} errors out of {total} rows.", file=sys.stderr
@@ -483,6 +533,7 @@ async def _run_streaming_adaptive_async(
     show_progress: bool = True,
     buffer_size: int = AsyncBufferedWriter.DEFAULT_BUFFER_SIZE,
     flush_interval: float = AsyncBufferedWriter.DEFAULT_FLUSH_INTERVAL,
+    clean_output: bool = True,
     # Phase 2: Scheduling options
     enable_scheduling: bool = False,
     max_pending_tasks: int = 1000,
@@ -511,6 +562,7 @@ async def _run_streaming_adaptive_async(
         show_progress: 進捗表示を行うか
         buffer_size: バッファサイズ（件数）
         flush_interval: 定期フラッシュ間隔（秒）
+        clean_output: 出力をクリーニングするか
 
     Returns:
         (完了数, エラー数) のタプル
@@ -524,6 +576,7 @@ async def _run_streaming_adaptive_async(
         output_path,
         buffer_size=buffer_size,
         flush_interval=flush_interval,
+        clean_output=clean_output,
     ) as writer:
         async for result in run_pipeline_streaming_adaptive(
             cfg,
@@ -573,6 +626,11 @@ async def _run_streaming_adaptive_async(
 
     if show_progress:
         print(file=sys.stderr)  # 最後に改行
+        if writer.total_cleaned > 0:
+            print(
+                f"[JSONL Cleaner] Cleaned {writer.total_cleaned} invalid JSON lines.",
+                file=sys.stderr,
+            )
         if errors > 0:
             print(
                 f"Completed with {errors} errors out of {total} rows.", file=sys.stderr
@@ -598,6 +656,7 @@ async def _run_streaming_adaptive_batched_async(
     show_progress: bool = True,
     buffer_size: int = AsyncBufferedWriter.DEFAULT_BUFFER_SIZE,
     flush_interval: float = AsyncBufferedWriter.DEFAULT_FLUSH_INTERVAL,
+    clean_output: bool = True,
     # Phase 2: Scheduling options
     enable_scheduling: bool = False,
     max_pending_tasks: int = 1000,
@@ -628,6 +687,7 @@ async def _run_streaming_adaptive_batched_async(
         show_progress: 進捗表示を行うか
         buffer_size: バッファサイズ（件数）
         flush_interval: 定期フラッシュ間隔（秒）
+        clean_output: 出力をクリーニングするか
 
     Returns:
         (完了数, エラー数) のタプル
@@ -641,6 +701,7 @@ async def _run_streaming_adaptive_batched_async(
         output_path,
         buffer_size=buffer_size,
         flush_interval=flush_interval,
+        clean_output=clean_output,
     ) as writer:
         async for result in run_pipeline_streaming_adaptive_batched(
             cfg,
@@ -691,6 +752,11 @@ async def _run_streaming_adaptive_batched_async(
 
     if show_progress:
         print(file=sys.stderr)
+        if writer.total_cleaned > 0:
+            print(
+                f"[JSONL Cleaner] Cleaned {writer.total_cleaned} invalid JSON lines.",
+                file=sys.stderr,
+            )
         if errors > 0:
             print(
                 f"Completed with {errors} errors out of {total} rows.", file=sys.stderr
@@ -718,6 +784,8 @@ def run_streaming_adaptive_batched(
     http2: bool = True,
     # LLM retry options
     retry_on_empty: bool = True,
+    # JSONL cleaning options
+    clean_output: bool = True,
     # Phase 2: Scheduling options
     enable_scheduling: bool = False,
     max_pending_tasks: int = 1000,
@@ -755,6 +823,7 @@ def run_streaming_adaptive_batched(
         enable_memory_optimization: メモリ最適化を有効化
         max_cache_size: コンテキストキャッシュの最大サイズ
         enable_memory_monitoring: メモリ使用状況監視を有効化
+        clean_output: 出力JSONLをクリーニングするか（デフォルト: True）
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
@@ -792,6 +861,7 @@ def run_streaming_adaptive_batched(
             max_wait_ms=max_wait_ms,
             save_intermediate=save_intermediate,
             show_progress=show_progress,
+            clean_output=clean_output,
             enable_scheduling=enable_scheduling,
             max_pending_tasks=max_pending_tasks,
             chunk_size=chunk_size,
@@ -817,6 +887,8 @@ def run_streaming_adaptive(
     http2: bool = True,
     # LLM retry options
     retry_on_empty: bool = True,
+    # JSONL cleaning options
+    clean_output: bool = True,
     # Phase 2: Scheduling options
     enable_scheduling: bool = False,
     max_pending_tasks: int = 1000,
@@ -852,6 +924,7 @@ def run_streaming_adaptive(
         enable_memory_optimization: メモリ最適化を有効化
         max_cache_size: コンテキストキャッシュの最大サイズ
         enable_memory_monitoring: メモリ使用状況監視を有効化
+        clean_output: 出力JSONLをクリーニングするか（デフォルト: True）
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
@@ -887,6 +960,7 @@ def run_streaming_adaptive(
             metrics_type=metrics_type,
             save_intermediate=save_intermediate,
             show_progress=show_progress,
+            clean_output=clean_output,
             enable_scheduling=enable_scheduling,
             max_pending_tasks=max_pending_tasks,
             chunk_size=chunk_size,
@@ -908,6 +982,8 @@ def run_streaming(
     http2: bool = True,
     # LLM retry options
     retry_on_empty: bool = True,
+    # JSONL cleaning options
+    clean_output: bool = True,
     # Phase 2: Scheduling options
     enable_scheduling: bool = False,
     max_pending_tasks: int = 1000,
@@ -943,6 +1019,7 @@ def run_streaming(
         enable_memory_monitoring: メモリ使用状況監視を有効化
         gc_interval: ガベージコレクション実行間隔（処理行数）
         memory_threshold_mb: メモリ使用量警告閾値（MB）
+        clean_output: 出力JSONLをクリーニングするか（デフォルト: True）
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
@@ -974,6 +1051,7 @@ def run_streaming(
             max_concurrent=max_concurrent,
             save_intermediate=save_intermediate,
             show_progress=show_progress,
+            clean_output=clean_output,
             enable_scheduling=enable_scheduling,
             max_pending_tasks=max_pending_tasks,
             chunk_size=chunk_size,
