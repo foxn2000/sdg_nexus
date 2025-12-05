@@ -27,7 +27,7 @@ models:
     base_url: http://localhost:8000/v1
     request_defaults:
       temperature: 0.7
-      max_tokens: 4096
+      max_tokens: 13000
       top_p: 0.9
 
 # グローバル変数
@@ -275,7 +275,7 @@ blocks:
     id: split_perspectives
     name: "Step 2.5: Split Perspectives into Individual Prompts"
     function: split_3d_perspectives
-    code_path: ./examples/helpers/format_helpers.py
+    code_path: ./examples/helpers/scaling_3d_helpers.py
     inputs:
       perspectives: "{Perspectives}"
       parallel_count: "{ParallelCount}"
@@ -698,7 +698,7 @@ blocks:
     id: collect_answers
     name: "Step 4a: Collect All Answers"
     function: collect_3d_answers
-    code_path: ./examples/helpers/format_helpers.py
+    code_path: ./examples/helpers/scaling_3d_helpers.py
     inputs:
       parallel_count: "{ActualParallelCount}"
       answer_1: "{answer_1}"
@@ -1063,7 +1063,7 @@ blocks:
     id: format_result
     name: "Format Final Result"
     function: format_3d_scaling_result
-    code_path: ./examples/helpers/format_helpers.py
+    code_path: ./examples/helpers/scaling_3d_helpers.py
     inputs:
       original_question: "{question}"
       question_type: "{QuestionType}"

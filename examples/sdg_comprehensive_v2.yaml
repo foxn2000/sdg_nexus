@@ -301,7 +301,7 @@ blocks:
         string: "format_helpers.py"
         pattern: ".+"
     function: format_comprehensive_result
-    code_path: ./examples/helpers/format_helpers.py
+    code_path: ./examples/helpers/comprehensive_helpers.py
     inputs:
       total: "{TotalSum}"
       fib: "{Fibonacci10}"

@@ -145,3 +145,5 @@ coverage/
 
 # Caches
 .cache/
+.out/
+.output/
