@@ -359,6 +359,7 @@ async def run_pipeline_streaming_adaptive(
         max_concurrency=max_concurrent,
         target_latency_ms=float(target_latency_ms),
         target_queue_depth=target_queue_depth,
+        initial_concurrency=max_concurrent,  # 最大並行数から開始
     )
 
     # MetricsCollector設定（メトリクスタイプに応じて）
@@ -612,6 +613,7 @@ async def run_pipeline_streaming_adaptive_batched(
         max_concurrency=max_concurrent,
         target_latency_ms=float(target_latency_ms),
         target_queue_depth=target_queue_depth,
+        initial_concurrency=max_concurrent,  # 最大並行数から開始
     )
 
     # MetricsCollector設定（メトリクスタイプに応じて）
