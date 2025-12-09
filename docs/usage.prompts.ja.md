@@ -36,7 +36,6 @@ MABEL（Model And Blocks Expansion Language）は、AIエージェントの処�
   - Roo Cline
   - Cline
   - Claude Code
-  - GitHub Copilot
   - Cursor
   - その他のAIアシスタント
 
@@ -44,9 +43,10 @@ MABEL（Model And Blocks Expansion Language）は、AIエージェントの処�
 
 高品質なMABELフローを生成するため、以下のような高性能モデルの使用を推奨します：
 
-- **Claude 3.5 Sonnet**（推奨）
-- **GPT-4 Turbo / GPT-4o**
-- **Gemini 1.5 Pro**
+- **Claude Opus 4.5**（推奨）
+- **GPT-5.1 Codex**
+- **Gemini 3 pro**
+- **Grok 4**
 - その他の最新のフロンティアモデル
 
 ### 必要な知識
