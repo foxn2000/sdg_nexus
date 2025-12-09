@@ -146,4 +146,6 @@ coverage/
 # Caches
 .cache/
 .out/
-.output/
+output/
+flows/
+flow/
