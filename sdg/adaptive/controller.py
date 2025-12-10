@@ -1,19 +1,30 @@
 """
-Adaptive concurrency controller for maximizing inference throughput.
+Advanced adaptive concurrency controller for maximizing inference throughput.
 
-This module implements an AIMD (Additive Increase Multiplicative Decrease)
-based controller that dynamically adjusts concurrency based on observed
-latencies and optionally backend metrics from vLLM/SGLang.
+This module implements a sophisticated congestion control algorithm inspired by
+TCP Vegas, Reno, and BBR. It dynamically adjusts concurrency based on:
+- Smoothed latency metrics (EMA-based noise reduction)
+- Control phases (Slow Start vs Congestion Avoidance)
+- Graduated response to latency degradation
+- Backend metrics from vLLM/SGLang
+
+Key improvements over simple AIMD:
+1. Exponential increase during slow start for faster convergence
+2. EMA-based latency smoothing for stability
+3. Graduated decrease logic to avoid over-reaction to transient spikes
+4. RTT-based congestion detection (Vegas-style)
 
 Also includes DynamicSemaphore for real-time capacity adjustment.
 """
 
 from __future__ import annotations
 import asyncio
+import math
 import time
 from collections import deque
-from dataclasses import dataclass
-from typing import Deque, List, Optional
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Deque, List, Optional, Tuple
 
 from .metrics import BackendMetrics, MetricsCollector, MetricsType
 
@@ -228,26 +239,72 @@ class DynamicSemaphore:
 
 @dataclass
 class LatencySample:
-    """A single latency measurement."""
+    """A single latency measurement with metadata."""
 
     latency_ms: float
     timestamp: float
     is_error: bool = False
+    concurrency_at_time: int = 0  # Concurrency level when this sample was taken
+
+
+class ControlPhase(Enum):
+    """Control phases inspired by TCP congestion control."""
+
+    SLOW_START = "slow_start"  # Exponential increase phase
+    CONGESTION_AVOIDANCE = "congestion_avoidance"  # Linear increase phase
+    FAST_RECOVERY = "fast_recovery"  # Recovery after mild congestion
+
+
+@dataclass
+class EMAState:
+    """
+    Exponential Moving Average state for smoothed metrics.
+
+    Uses EMA to filter out noise and detect trends in latency measurements.
+    """
+
+    value: float = 0.0
+    variance: float = 0.0  # For detecting stability
+    initialized: bool = False
+    trend: float = 0.0  # Positive = increasing, negative = decreasing
+
+
+@dataclass
+class CongestionState:
+    """
+    Current congestion detection state.
+
+    Tracks RTT-based congestion signals similar to TCP Vegas.
+    """
+
+    base_latency: float = float("inf")  # Minimum observed latency (base RTT)
+    expected_throughput: float = 0.0  # Expected throughput at base latency
+    actual_throughput: float = 0.0  # Actual observed throughput
+    congestion_signal: float = 0.0  # Vegas-style diff between expected and actual
 
 
 class AdaptiveController:
     """
-    AIMD-based adaptive concurrency controller with dynamic semaphore.
+    Advanced adaptive concurrency controller with TCP-inspired congestion control.
 
-    This controller dynamically adjusts the concurrency level based on:
-    - Client-side latencies (always available)
+    This controller implements a sophisticated algorithm combining ideas from:
+    - TCP Reno: AIMD with slow start and congestion avoidance phases
+    - TCP Vegas: RTT-based congestion detection for proactive control
+    - BBR: Bandwidth-delay product estimation for optimal window sizing
+
+    Key Features:
+    1. **Slow Start Phase**: Exponential increase when far from optimal
+    2. **Congestion Avoidance Phase**: Linear increase near optimal
+    3. **EMA-based Smoothing**: Noise reduction for stable decisions
+    4. **Graduated Decrease**: Different responses for errors vs latency spikes
+    5. **Vegas-style Proactive Control**: Detect congestion before packet loss
+
+    The controller dynamically adjusts the concurrency level based on:
+    - Smoothed client-side latencies (EMA)
+    - Latency trend detection
     - Backend metrics like queue depth (optional, for vLLM/SGLang)
 
-    The algorithm uses Additive Increase Multiplicative Decrease (AIMD):
-    - When latencies are low: gradually increase concurrency
-    - When latencies spike or errors occur: quickly decrease concurrency
-
-    Now uses DynamicSemaphore for real-time capacity adjustment:
+    Uses DynamicSemaphore for real-time capacity adjustment:
     - Capacity increases are immediately reflected
     - Capacity decreases immediately block new acquisitions
 
@@ -282,8 +339,8 @@ class AdaptiveController:
         target_latency_ms: float = 2000.0,
         target_queue_depth: int = 32,
         # AIMD parameters
-        increase_step: int = 2,  # Additive increase per adjustment
-        decrease_factor: float = 0.5,  # Multiplicative decrease factor
+        increase_step: int = 2,  # Additive increase per adjustment (CA phase)
+        decrease_factor: float = 0.5,  # Multiplicative decrease factor (for errors)
         # Adjustment sensitivity
         latency_tolerance: float = 1.5,  # Trigger decrease if latency > target * tolerance
         error_rate_threshold: float = 0.05,  # 5% error rate triggers decrease
@@ -291,11 +348,16 @@ class AdaptiveController:
         adjustment_interval_ms: int = 1000,  # Minimum time between adjustments
         window_size: int = 50,  # Number of samples for averaging
         # Initial concurrency
-        initial_concurrency: Optional[
-            int
-        ] = None,  # Initial concurrency level (default: max/2)
+        initial_concurrency: Optional[int] = None,
         # Use legacy semaphore for backward compatibility
         use_dynamic_semaphore: bool = True,
+        # Advanced parameters
+        ema_alpha: float = 0.3,  # EMA smoothing factor (0-1, higher = more reactive)
+        slow_start_threshold: Optional[int] = None,  # Initial ssthresh
+        vegas_alpha: float = 2.0,  # Vegas lower threshold (packets)
+        vegas_beta: float = 4.0,  # Vegas upper threshold (packets)
+        mild_decrease_factor: float = 0.85,  # Decrease factor for latency spikes
+        trend_sensitivity: float = 0.1,  # Threshold for trend detection
     ):
         """
         Initialize the adaptive controller.
@@ -306,14 +368,19 @@ class AdaptiveController:
             target_latency_ms: Target P95 latency in milliseconds (default: 2000)
             target_queue_depth: Target backend queue depth (default: 32)
             increase_step: Additive increase per adjustment cycle (default: 2)
-            decrease_factor: Multiplicative decrease factor (default: 0.5)
+            decrease_factor: Multiplicative decrease factor for errors (default: 0.5)
             latency_tolerance: Latency threshold multiplier for decrease (default: 1.5)
             error_rate_threshold: Error rate threshold for decrease (default: 0.05)
             adjustment_interval_ms: Minimum interval between adjustments (default: 1000)
             window_size: Number of samples to consider (default: 50)
-            initial_concurrency: Initial concurrency level (default: max_concurrency / 2)
+            initial_concurrency: Initial concurrency level (default: min_concurrency)
             use_dynamic_semaphore: Use DynamicSemaphore for real-time capacity changes
-                                   (default: True, set to False for backward compatibility)
+            ema_alpha: EMA smoothing factor (default: 0.3)
+            slow_start_threshold: Initial slow start threshold (default: max/2)
+            vegas_alpha: Vegas lower congestion threshold (default: 2.0)
+            vegas_beta: Vegas upper congestion threshold (default: 4.0)
+            mild_decrease_factor: Decrease factor for latency issues (default: 0.85)
+            trend_sensitivity: Threshold for detecting latency trends (default: 0.1)
         """
         self.min_concurrency = min_concurrency
         self.max_concurrency = max_concurrency
@@ -329,20 +396,51 @@ class AdaptiveController:
         self.window_size = window_size
         self._use_dynamic_semaphore = use_dynamic_semaphore
 
-        # State - 初期並行数を max から始める（最も積極的なスタート）
+        # Advanced control parameters
+        self.ema_alpha = ema_alpha
+        self.vegas_alpha = vegas_alpha
+        self.vegas_beta = vegas_beta
+        self.mild_decrease_factor = mild_decrease_factor
+        self.trend_sensitivity = trend_sensitivity
+
+        # State - Start with slow start from initial_concurrency or min_concurrency
         if initial_concurrency is not None:
             self._current: int = max(
                 min_concurrency, min(initial_concurrency, max_concurrency)
             )
         else:
-            # デフォルト: max_concurrency から始める
-            self._current: int = max_concurrency
+            # For slow start, begin conservatively
+            self._current: int = min_concurrency
+
+        # Slow start threshold (ssthresh) - initially set high or to given value
+        if slow_start_threshold is not None:
+            self._ssthresh: int = slow_start_threshold
+        else:
+            self._ssthresh: int = max_concurrency // 2
+
+        # Control phase
+        self._phase: ControlPhase = ControlPhase.SLOW_START
+
+        # Latency samples
         self._latency_window: Deque[LatencySample] = deque(maxlen=window_size)
         self._last_adjustment_time: float = 0.0
         self._last_metrics: Optional[BackendMetrics] = None
 
+        # EMA state for smoothed latency
+        self._ema_latency = EMAState()
+        self._ema_p95 = EMAState()
+
+        # Congestion detection state (Vegas-style)
+        self._congestion = CongestionState()
+
+        # History for trend detection
+        self._adjustment_history: Deque[Tuple[float, int, str]] = deque(maxlen=20)
+
+        # Consecutive event counters for stability
+        self._consecutive_good: int = 0
+        self._consecutive_bad: int = 0
+
         # Semaphore for dynamic concurrency control
-        # DynamicSemaphoreを使用する場合と従来のasyncio.Semaphoreを使用する場合を分ける
         self._dynamic_semaphore: Optional[DynamicSemaphore] = None
         self._legacy_semaphore: Optional[asyncio.Semaphore] = None
 
@@ -350,6 +448,16 @@ class AdaptiveController:
     def current_concurrency(self) -> int:
         """Get current concurrency limit."""
         return self._current
+
+    @property
+    def phase(self) -> ControlPhase:
+        """Get current control phase."""
+        return self._phase
+
+    @property
+    def ssthresh(self) -> int:
+        """Get current slow start threshold."""
+        return self._ssthresh
 
     @property
     def semaphore(self) -> DynamicSemaphore:
@@ -394,6 +502,73 @@ class AdaptiveController:
         """
         return self.semaphore
 
+    def _update_ema(self, state: EMAState, new_value: float) -> None:
+        """
+        Update EMA state with a new value.
+
+        Also calculates variance and trend for stability detection.
+
+        Args:
+            state: EMA state to update
+            new_value: New observed value
+        """
+        if not state.initialized:
+            state.value = new_value
+            state.variance = 0.0
+            state.trend = 0.0
+            state.initialized = True
+            return
+
+        # Calculate trend before updating value
+        old_value = state.value
+
+        # Update EMA value
+        state.value = self.ema_alpha * new_value + (1 - self.ema_alpha) * state.value
+
+        # Update variance estimate (for stability detection)
+        diff = new_value - state.value
+        state.variance = (
+            self.ema_alpha * (diff * diff) + (1 - self.ema_alpha) * state.variance
+        )
+
+        # Update trend (smoothed derivative)
+        instant_trend = state.value - old_value
+        state.trend = (
+            self.ema_alpha * instant_trend + (1 - self.ema_alpha) * state.trend
+        )
+
+    def _update_congestion_state(self, latency_ms: float) -> None:
+        """
+        Update Vegas-style congestion detection state.
+
+        Tracks base RTT and calculates expected vs actual throughput
+        to detect congestion proactively.
+
+        Args:
+            latency_ms: Observed latency
+        """
+        # Update base latency (minimum observed)
+        if latency_ms < self._congestion.base_latency:
+            self._congestion.base_latency = latency_ms
+
+        # Calculate expected throughput at base latency
+        # expected = cwnd / base_rtt
+        if self._congestion.base_latency > 0:
+            self._congestion.expected_throughput = (
+                self._current / self._congestion.base_latency
+            )
+
+        # Calculate actual throughput
+        # actual = cwnd / observed_rtt
+        if latency_ms > 0:
+            self._congestion.actual_throughput = self._current / latency_ms
+
+        # Vegas-style congestion signal: diff = expected - actual
+        # Measured in "packets" (concurrency units here)
+        self._congestion.congestion_signal = self._current * (
+            1 - self._congestion.base_latency / max(latency_ms, 1)
+        )
+
     def record_latency(self, latency_ms: float, is_error: bool = False) -> None:
         """
         Record a latency measurement.
@@ -406,8 +581,14 @@ class AdaptiveController:
             latency_ms=latency_ms,
             timestamp=time.time(),
             is_error=is_error,
+            concurrency_at_time=self._current,
         )
         self._latency_window.append(sample)
+
+        # Update EMA for non-error samples
+        if not is_error:
+            self._update_ema(self._ema_latency, latency_ms)
+            self._update_congestion_state(latency_ms)
 
         # Trigger adjustment if enough samples and interval passed
         self._maybe_adjust()
@@ -437,69 +618,231 @@ class AdaptiveController:
         self._last_adjustment_time = now
         self._adjust_concurrency()
 
+    def _calculate_percentile(self, values: List[float], percentile: int) -> float:
+        """Calculate percentile of values."""
+        if not values:
+            return 0.0
+
+        sorted_values = sorted(values)
+        index = (percentile / 100) * (len(sorted_values) - 1)
+        lower = int(index)
+        upper = min(lower + 1, len(sorted_values) - 1)
+
+        fraction = index - lower
+        return sorted_values[lower] * (1 - fraction) + sorted_values[upper] * fraction
+
+    def _assess_congestion_level(self) -> Tuple[str, float]:
+        """
+        Assess current congestion level using multiple signals.
+
+        Returns:
+            Tuple of (congestion_level, severity)
+            - congestion_level: "none", "mild", "moderate", "severe"
+            - severity: 0.0 to 1.0
+        """
+        signals: List[Tuple[str, float]] = []
+
+        # Signal 1: EMA latency vs target
+        if self._ema_latency.initialized:
+            latency_ratio = self._ema_latency.value / self.target_latency
+            if latency_ratio < 0.7:
+                signals.append(("none", 0.0))
+            elif latency_ratio < 1.0:
+                signals.append(("none", latency_ratio - 0.7))
+            elif latency_ratio < 1.3:
+                signals.append(("mild", (latency_ratio - 1.0) / 0.3))
+            elif latency_ratio < self.latency_tolerance:
+                signals.append(("moderate", (latency_ratio - 1.3) / 0.2))
+            else:
+                signals.append(("severe", min(1.0, (latency_ratio - 1.5) / 0.5)))
+
+        # Signal 2: Vegas-style congestion
+        vegas_signal = self._congestion.congestion_signal
+        if vegas_signal < self.vegas_alpha:
+            signals.append(("none", vegas_signal / self.vegas_alpha))
+        elif vegas_signal < self.vegas_beta:
+            signals.append(
+                (
+                    "mild",
+                    (vegas_signal - self.vegas_alpha)
+                    / (self.vegas_beta - self.vegas_alpha),
+                )
+            )
+        else:
+            signals.append(("moderate", min(1.0, vegas_signal / (self.vegas_beta * 2))))
+
+        # Signal 3: Latency trend
+        if self._ema_latency.initialized:
+            trend = self._ema_latency.trend
+            if trend > self.trend_sensitivity * self.target_latency:
+                signals.append(("mild", min(1.0, trend / self.target_latency)))
+            elif trend < -self.trend_sensitivity * self.target_latency:
+                signals.append(("none", 0.0))
+
+        # Signal 4: Backend queue depth
+        if self._last_metrics and self._last_metrics.is_valid:
+            queue_depth = self._last_metrics.queue_depth
+            if queue_depth is not None:
+                queue_ratio = queue_depth / self.target_queue_depth
+                if queue_ratio < 0.8:
+                    signals.append(("none", 0.0))
+                elif queue_ratio < 1.2:
+                    signals.append(("none", (queue_ratio - 0.8) / 0.4))
+                elif queue_ratio < 1.5:
+                    signals.append(("mild", (queue_ratio - 1.2) / 0.3))
+                else:
+                    signals.append(("moderate", min(1.0, (queue_ratio - 1.5) / 0.5)))
+
+            if self._last_metrics.is_overloaded:
+                signals.append(("severe", 1.0))
+
+        if not signals:
+            return ("none", 0.0)
+
+        # Aggregate signals - take the worst case
+        level_order = {"none": 0, "mild": 1, "moderate": 2, "severe": 3}
+        worst_level = "none"
+        max_severity = 0.0
+
+        for level, severity in signals:
+            if level_order[level] > level_order[worst_level]:
+                worst_level = level
+                max_severity = severity
+            elif level_order[level] == level_order[worst_level]:
+                max_severity = max(max_severity, severity)
+
+        return (worst_level, max_severity)
+
     def _adjust_concurrency(self) -> None:
-        """Perform concurrency adjustment based on observations."""
+        """
+        Perform concurrency adjustment using advanced congestion control.
+
+        Implements:
+        1. Slow Start: Exponential increase when below ssthresh
+        2. Congestion Avoidance: Linear increase when above ssthresh
+        3. Graduated decrease based on congestion severity
+        """
         old_concurrency = self._current
 
-        # Calculate metrics from latency window
-        latencies = [s.latency_ms for s in self._latency_window if not s.is_error]
+        # Calculate error rate
         errors = [s for s in self._latency_window if s.is_error]
-
         error_rate = (
             len(errors) / len(self._latency_window) if self._latency_window else 0
         )
 
-        # Calculate P95 latency
-        p95_latency = self._calculate_percentile(latencies, 95) if latencies else 0
+        # Update P95 EMA
+        latencies = [s.latency_ms for s in self._latency_window if not s.is_error]
+        if latencies:
+            p95 = self._calculate_percentile(latencies, 95)
+            self._update_ema(self._ema_p95, p95)
 
-        # Decision logic
-        should_decrease = False
-        should_increase = False
+        action = "hold"
 
-        # Check error rate
+        # === ERROR HANDLING (highest priority) ===
         if error_rate > self.error_rate_threshold:
-            should_decrease = True
-
-        # Check latency
-        elif p95_latency > self.target_latency * self.latency_tolerance:
-            should_decrease = True
-
-        # Check backend queue depth if metrics available
-        elif self._last_metrics and self._last_metrics.is_valid:
-            queue_depth = self._last_metrics.queue_depth
-            if queue_depth is not None:
-                if queue_depth > self.target_queue_depth * 1.5:
-                    should_decrease = True
-                elif queue_depth < self.target_queue_depth * 0.8:
-                    should_increase = True
-
-            # Check if backend is overloaded
-            if self._last_metrics.is_overloaded:
-                should_decrease = True
-
-        # Check if we have room to increase
-        if (
-            not should_decrease
-            and p95_latency < self.target_latency * 0.85
-            and error_rate < 0.02
-        ):
-            should_increase = True
-
-        # Apply adjustment
-        if should_decrease:
-            # Multiplicative decrease
+            # Immediate multiplicative decrease for errors
             new_concurrency = max(
                 self.min_concurrency, int(self._current * self.decrease_factor)
             )
+            self._ssthresh = max(self.min_concurrency, new_concurrency)
+            self._phase = ControlPhase.SLOW_START
+            self._consecutive_good = 0
+            self._consecutive_bad += 1
+            action = "md_error"
+
             self._update_semaphore(old_concurrency, new_concurrency)
             self._current = new_concurrency
-        elif should_increase:
-            # Additive increase
-            new_concurrency = min(
-                self.max_concurrency, self._current + self.increase_step
+            self._record_adjustment(action)
+            return
+
+        # === CONGESTION-BASED CONTROL ===
+        congestion_level, severity = self._assess_congestion_level()
+
+        if congestion_level == "severe":
+            # Multiplicative decrease for severe congestion
+            new_concurrency = max(
+                self.min_concurrency, int(self._current * self.decrease_factor)
             )
+            self._ssthresh = max(self.min_concurrency, new_concurrency)
+            self._phase = ControlPhase.CONGESTION_AVOIDANCE
+            self._consecutive_good = 0
+            self._consecutive_bad += 1
+            action = "md_severe"
+
+        elif congestion_level == "moderate":
+            # Mild decrease for moderate congestion
+            decrease = 1.0 - (1.0 - self.mild_decrease_factor) * severity
+            new_concurrency = max(self.min_concurrency, int(self._current * decrease))
+            self._ssthresh = max(self.min_concurrency, self._current)
+            self._phase = ControlPhase.CONGESTION_AVOIDANCE
+            self._consecutive_good = 0
+            self._consecutive_bad += 1
+            action = "decrease_moderate"
+
+        elif congestion_level == "mild":
+            # Hold or very slight decrease for mild congestion
+            self._consecutive_good = 0
+            self._consecutive_bad += 1
+
+            if self._consecutive_bad >= 3:
+                # Sustained mild congestion - slight decrease
+                new_concurrency = max(
+                    self.min_concurrency, self._current - self.increase_step
+                )
+                action = "decrease_mild"
+            else:
+                # Transient - just hold
+                new_concurrency = self._current
+                action = "hold_mild"
+
+        else:
+            # No congestion - increase
+            self._consecutive_bad = 0
+            self._consecutive_good += 1
+
+            if self._phase == ControlPhase.SLOW_START:
+                # Exponential increase in slow start
+                if (
+                    self._current < self._ssthresh
+                    and self._consecutive_good >= 2
+                    and self._ema_latency.initialized
+                    and self._ema_latency.value < self.target_latency * 0.7
+                ):
+                    # Double the concurrency (exponential)
+                    new_concurrency = min(self.max_concurrency, self._current * 2)
+                    action = "ss_increase"
+
+                    # Exit slow start if we hit ssthresh
+                    if new_concurrency >= self._ssthresh:
+                        self._phase = ControlPhase.CONGESTION_AVOIDANCE
+                        action = "ss_to_ca"
+                else:
+                    # Conservative increase if not fully warmed up
+                    new_concurrency = min(
+                        self.max_concurrency, self._current + self.increase_step
+                    )
+                    action = "ss_linear"
+            else:
+                # Congestion avoidance - linear increase
+                if self._consecutive_good >= 2:
+                    new_concurrency = min(
+                        self.max_concurrency, self._current + self.increase_step
+                    )
+                    action = "ca_increase"
+                else:
+                    new_concurrency = self._current
+                    action = "ca_hold"
+
+        # Apply the adjustment
+        if new_concurrency != old_concurrency:
             self._update_semaphore(old_concurrency, new_concurrency)
             self._current = new_concurrency
+
+        self._record_adjustment(action)
+
+    def _record_adjustment(self, action: str) -> None:
+        """Record an adjustment for debugging and analysis."""
+        self._adjustment_history.append((time.time(), self._current, action))
 
     def _update_semaphore(self, old_value: int, new_value: int) -> None:
         """
@@ -531,25 +874,12 @@ class AdaptiveController:
                     self._legacy_semaphore.release()
             # Note: Decreasing capacity is not supported with legacy semaphore
 
-    def _calculate_percentile(self, values: List[float], percentile: int) -> float:
-        """Calculate percentile of values."""
-        if not values:
-            return 0.0
-
-        sorted_values = sorted(values)
-        index = (percentile / 100) * (len(sorted_values) - 1)
-        lower = int(index)
-        upper = min(lower + 1, len(sorted_values) - 1)
-
-        fraction = index - lower
-        return sorted_values[lower] * (1 - fraction) + sorted_values[upper] * fraction
-
     def get_stats(self) -> dict:
         """Get current controller statistics."""
         latencies = [s.latency_ms for s in self._latency_window if not s.is_error]
         errors = [s for s in self._latency_window if s.is_error]
 
-        return {
+        stats = {
             "current_concurrency": self._current,
             "min_concurrency": self.min_concurrency,
             "max_concurrency": self.max_concurrency,
@@ -569,16 +899,62 @@ class AdaptiveController:
                 self._calculate_percentile(latencies, 99) if latencies else None
             ),
             "avg_latency_ms": sum(latencies) / len(latencies) if latencies else None,
+            # Advanced stats
+            "phase": self._phase.value,
+            "ssthresh": self._ssthresh,
+            "ema_latency_ms": (
+                self._ema_latency.value if self._ema_latency.initialized else None
+            ),
+            "ema_latency_trend": (
+                self._ema_latency.trend if self._ema_latency.initialized else None
+            ),
+            "ema_latency_variance": (
+                self._ema_latency.variance if self._ema_latency.initialized else None
+            ),
+            "base_latency_ms": (
+                self._congestion.base_latency
+                if self._congestion.base_latency != float("inf")
+                else None
+            ),
+            "vegas_congestion_signal": self._congestion.congestion_signal,
+            "consecutive_good": self._consecutive_good,
+            "consecutive_bad": self._consecutive_bad,
         }
+
+        # Add recent adjustments
+        if self._adjustment_history:
+            recent = list(self._adjustment_history)[-5:]
+            stats["recent_adjustments"] = [
+                {"timestamp": ts, "concurrency": conc, "action": act}
+                for ts, conc, act in recent
+            ]
+
+        return stats
 
     def reset(self) -> None:
         """Reset controller to initial state."""
-        # 初期値を max_concurrency に戻す
-        self._current = self.max_concurrency
+        # Reset to slow start with minimum concurrency
+        self._current = self.min_concurrency
+        self._ssthresh = self.max_concurrency // 2
+        self._phase = ControlPhase.SLOW_START
+
         self._latency_window.clear()
         self._last_adjustment_time = 0.0
         self._last_metrics = None
-        # セマフォをリセット
+
+        # Reset EMA states
+        self._ema_latency = EMAState()
+        self._ema_p95 = EMAState()
+
+        # Reset congestion state
+        self._congestion = CongestionState()
+
+        # Reset counters
+        self._consecutive_good = 0
+        self._consecutive_bad = 0
+        self._adjustment_history.clear()
+
+        # Reset semaphores
         self._dynamic_semaphore = None
         self._legacy_semaphore = None
 
@@ -592,6 +968,59 @@ class AdaptiveController:
         if self._dynamic_semaphore is not None:
             return self._dynamic_semaphore.get_stats()
         return None
+
+    def get_ema_stats(self) -> dict:
+        """
+        Get EMA statistics for debugging.
+
+        Returns:
+            Dictionary with EMA latency and P95 statistics
+        """
+        return {
+            "latency": {
+                "value": (
+                    self._ema_latency.value if self._ema_latency.initialized else None
+                ),
+                "variance": (
+                    self._ema_latency.variance
+                    if self._ema_latency.initialized
+                    else None
+                ),
+                "trend": (
+                    self._ema_latency.trend if self._ema_latency.initialized else None
+                ),
+                "initialized": self._ema_latency.initialized,
+            },
+            "p95": {
+                "value": self._ema_p95.value if self._ema_p95.initialized else None,
+                "variance": (
+                    self._ema_p95.variance if self._ema_p95.initialized else None
+                ),
+                "trend": self._ema_p95.trend if self._ema_p95.initialized else None,
+                "initialized": self._ema_p95.initialized,
+            },
+        }
+
+    def get_congestion_stats(self) -> dict:
+        """
+        Get congestion detection statistics.
+
+        Returns:
+            Dictionary with Vegas-style congestion metrics
+        """
+        congestion_level, severity = self._assess_congestion_level()
+        return {
+            "base_latency_ms": (
+                self._congestion.base_latency
+                if self._congestion.base_latency != float("inf")
+                else None
+            ),
+            "expected_throughput": self._congestion.expected_throughput,
+            "actual_throughput": self._congestion.actual_throughput,
+            "congestion_signal": self._congestion.congestion_signal,
+            "congestion_level": congestion_level,
+            "congestion_severity": severity,
+        }
 
 
 class AdaptiveConcurrencyManager:

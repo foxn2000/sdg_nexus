@@ -110,9 +110,11 @@ sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
 - Optional request batching for maximum throughput
 
 **How It Works:**
-The adaptive controller uses an AIMD (Additive Increase Multiplicative Decrease) algorithm:
-- **Increase**: Gradually adds +2 to concurrency when P95 latency < target × 0.7
-- **Decrease**: Quickly reduces by 50% when latency > target × 1.5 or errors occur
+The adaptive controller uses an algorithm inspired by TCP congestion control (Vegas/Reno/BBR):
+- **Slow Start**: Doubles concurrency when P95 latency < target × 0.7 (exponential increase)
+- **Congestion Avoidance**: Linear increase (+2) after reaching ssthresh
+- **Graduated Decrease**: 15%-50% reduction based on congestion severity (mild congestion ignored)
+- **EMA Smoothing**: Filters noise and detects trends
 - **Monitoring**: Polls backend metrics every 500ms (if enabled)
 - **Adjustment**: Evaluates every 1 second based on last 50 samples
 
@@ -358,13 +360,32 @@ SDG Nexus provides advanced optimization features for high-throughput LLM infere
 
 ### Adaptive Concurrency Control
 
-The [`AdaptiveController`](../sdg/adaptive/controller.py:28) automatically adjusts concurrency levels based on observed latencies and backend metrics using an AIMD (Additive Increase Multiplicative Decrease) algorithm.
+The [`AdaptiveController`](../sdg/adaptive/controller.py:286) implements advanced control logic inspired by TCP congestion control algorithms (Vegas, Reno, BBR) to automatically adjust concurrency levels based on observed latencies and backend metrics.
 
 **Key Features:**
-- Automatically increases concurrency when latencies are low
-- Quickly decreases concurrency when errors occur or latencies spike
+- **Control Phases**: Two-phase control with Slow Start (exponential increase) and Congestion Avoidance (linear increase)
+- **EMA-based Smoothing**: Noise reduction and trend detection using Exponential Moving Average
+- **Vegas-style Congestion Detection**: Proactive RTT-based congestion detection
+- **Graduated Decrease Logic**: Immediate decrease for errors, gentle decrease for latency issues
 - Monitors backend queue depth and cache usage (vLLM/SGLang)
 - Maintains target latency bounds
+
+**Algorithm Details:**
+
+1. **Slow Start Phase**:
+   - When concurrency is below ssthresh (slow start threshold) and latency is below 70% of target
+   - Exponentially increases concurrency (doubles)
+   - Quickly converges to optimal concurrency
+
+2. **Congestion Avoidance Phase**:
+   - Linear increase (Additive Increase) after reaching ssthresh
+   - Cautiously explores the upper limit
+
+3. **Graduated Decrease Logic**:
+   - On errors: Immediate Multiplicative Decrease
+   - Severe congestion: Multiplicative decrease (50%)
+   - Moderate congestion: Gentle decrease (15%)
+   - Mild congestion: Linear decrease only after 3 consecutive detections
 
 **Basic Usage:**
 
@@ -381,6 +402,9 @@ controller = AdaptiveController(
 # Get current concurrency limit
 limit = controller.current_concurrency
 
+# Get current control phase
+phase = controller.phase  # ControlPhase.SLOW_START or ControlPhase.CONGESTION_AVOIDANCE
+
 # Record completed request
 controller.record_latency(latency_ms=150.0, is_error=False)
 
@@ -388,6 +412,9 @@ controller.record_latency(latency_ms=150.0, is_error=False)
 stats = controller.get_stats()
 print(f"Current concurrency: {stats['current_concurrency']}")
 print(f"P95 latency: {stats['p95_latency_ms']}ms")
+print(f"Control phase: {stats['phase']}")
+print(f"EMA latency: {stats['ema_latency_ms']}ms")
+print(f"Congestion signal: {stats['vegas_congestion_signal']}")
 ```
 
 **Advanced Configuration:**
@@ -398,16 +425,39 @@ controller = AdaptiveController(
     max_concurrency=128,
     target_latency_ms=2000.0,
     target_queue_depth=32,
-    # AIMD parameters
-    increase_step=2,              # Additive increase per cycle
-    decrease_factor=0.5,          # Multiplicative decrease (50%)
+    # Basic AIMD parameters
+    increase_step=2,              # Additive increase per cycle in CA phase
+    decrease_factor=0.5,          # Multiplicative decrease for errors (50%)
     # Sensitivity
     latency_tolerance=1.5,        # Decrease if latency > target * 1.5
     error_rate_threshold=0.05,    # Decrease if error rate > 5%
     # Timing
     adjustment_interval_ms=1000,  # Adjust every 1 second
     window_size=50,               # Track last 50 samples
+    # Advanced parameters
+    ema_alpha=0.3,                # EMA smoothing factor (0-1, higher = more reactive)
+    slow_start_threshold=32,      # Initial ssthresh
+    vegas_alpha=2.0,              # Vegas lower threshold
+    vegas_beta=4.0,               # Vegas upper threshold
+    mild_decrease_factor=0.85,    # Decrease factor for mild congestion (15% reduction)
+    trend_sensitivity=0.1,        # Trend detection sensitivity
 )
+```
+
+**Getting EMA and Congestion Statistics:**
+
+```python
+# EMA statistics (noise-filtered latency)
+ema_stats = controller.get_ema_stats()
+print(f"Smoothed latency: {ema_stats['latency']['value']}ms")
+print(f"Latency trend: {ema_stats['latency']['trend']}")  # positive=increasing, negative=decreasing
+print(f"Latency variance: {ema_stats['latency']['variance']}")
+
+# Congestion detection statistics (Vegas-style)
+congestion_stats = controller.get_congestion_stats()
+print(f"Base latency: {congestion_stats['base_latency_ms']}ms")
+print(f"Congestion level: {congestion_stats['congestion_level']}")  # none/mild/moderate/severe
+print(f"Congestion signal: {congestion_stats['congestion_signal']}")
 ```
 
 ### Metrics Collection

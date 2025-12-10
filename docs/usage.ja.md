@@ -110,9 +110,11 @@ sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl \
 - 最大スループットのためのオプションのリクエストバッチング
 
 **動作原理:**
-適応的コントローラーはAIMD（加法増加乗法減少）アルゴリズムを使用:
-- **増加**: P95レイテンシが目標値の0.7倍未満の場合、並行数に+2を加算
-- **減少**: レイテンシが目標値の1.5倍を超えるかエラーが発生した場合、50%減少
+適応的コントローラーはTCP輻輳制御（Vegas/Reno/BBR）にインスパイアされたアルゴリズムを使用:
+- **Slow Start**: レイテンシが目標値の0.7倍未満の場合、並行数を2倍に増加（指数増加）
+- **Congestion Avoidance**: ssthresh到達後は+2ずつ線形増加
+- **段階的減少**: 輻輳の深刻度に応じて15%〜50%減少（軽度の輻輳は無視）
+- **EMA平滑化**: ノイズを除去してトレンドを検出
 - **監視**: バックエンドメトリクスを500msごとにポーリング（有効化時）
 - **調整**: 直近50サンプルに基づいて1秒ごとに評価
 
@@ -358,13 +360,32 @@ SDG Nexusは、高スループットのLLM推論ワークロードのための�
 
 ### 適応型並行制御
 
-[`AdaptiveController`](../sdg/adaptive/controller.py:28)は、AIMD（加法増加乗法減少）アルゴリズムを使用して、観測されたレイテンシとバックエンドメトリクスに基づいて並行レベルを自動調整します。
+[`AdaptiveController`](../sdg/adaptive/controller.py:286)は、TCP輻輳制御アルゴリズム（Vegas、Reno、BBR）にインスパイアされた高度な制御ロジックを実装し、観測されたレイテンシとバックエンドメトリクスに基づいて並行レベルを自動調整します。
 
 **主な機能:**
-- レイテンシが低い場合は並行度を自動的に増加
-- エラー発生やレイテンシの急上昇時には並行度を素早く減少
+- **制御フェーズ**: Slow Start（指数増加）とCongestion Avoidance（線形増加）の2フェーズ制御
+- **EMAベースの平滑化**: 指数移動平均によるノイズ除去とトレンド検出
+- **Vegas-style輻輳検出**: RTTベースのプロアクティブな輻輳検出
+- **段階的減少ロジック**: エラー時は即座に、レイテンシ悪化時は緩やかに減少
 - バックエンドのキュー深度とキャッシュ使用率を監視（vLLM/SGLang）
 - 目標レイテンシ境界を維持
+
+**アルゴリズムの詳細:**
+
+1. **Slow Start フェーズ**:
+   - 並行数がssthresh（スロースタート閾値）未満、かつレイテンシが目標の70%以下の場合
+   - 並行数を指数関数的に増加（2倍）
+   - 最適な並行数に素早く収束
+
+2. **Congestion Avoidance フェーズ**:
+   - ssthresh到達後は線形増加（Additive Increase）
+   - 慎重に上限を探る
+
+3. **段階的減少ロジック**:
+   - エラー発生時: 即座に乗算減少（Multiplicative Decrease）
+   - 深刻な輻輳: 乗算減少（50%）
+   - 中程度の輻輳: 緩やかな減少（15%）
+   - 軽度の輻輳: 3回連続で検出された場合のみ線形減少
 
 **基本的な使用方法:**
 
@@ -381,6 +402,9 @@ controller = AdaptiveController(
 # 現在の並行度制限を取得
 limit = controller.current_concurrency
 
+# 現在の制御フェーズを取得
+phase = controller.phase  # ControlPhase.SLOW_START or ControlPhase.CONGESTION_AVOIDANCE
+
 # 完了したリクエストを記録
 controller.record_latency(latency_ms=150.0, is_error=False)
 
@@ -388,6 +412,9 @@ controller.record_latency(latency_ms=150.0, is_error=False)
 stats = controller.get_stats()
 print(f"現在の並行度: {stats['current_concurrency']}")
 print(f"P95レイテンシ: {stats['p95_latency_ms']}ms")
+print(f"制御フェーズ: {stats['phase']}")
+print(f"EMA レイテンシ: {stats['ema_latency_ms']}ms")
+print(f"輻輳シグナル: {stats['vegas_congestion_signal']}")
 ```
 
 **詳細設定:**
@@ -398,16 +425,39 @@ controller = AdaptiveController(
     max_concurrency=128,
     target_latency_ms=2000.0,
     target_queue_depth=32,
-    # AIMDパラメータ
-    increase_step=2,              # サイクルごとの加法増加量
-    decrease_factor=0.5,          # 乗法減少係数（50%）
+    # 基本AIMDパラメータ
+    increase_step=2,              # CAフェーズでのサイクルごとの加法増加量
+    decrease_factor=0.5,          # エラー時の乗法減少係数（50%）
     # 感度
     latency_tolerance=1.5,        # レイテンシが目標の1.5倍を超えたら減少
     error_rate_threshold=0.05,    # エラー率が5%を超えたら減少
     # タイミング
     adjustment_interval_ms=1000,  # 1秒ごとに調整
     window_size=50,               # 直近50サンプルを追跡
+    # 高度なパラメータ
+    ema_alpha=0.3,                # EMA平滑化係数（0-1、高いほど反応的）
+    slow_start_threshold=32,      # 初期ssthresh
+    vegas_alpha=2.0,              # Vegas下限閾値
+    vegas_beta=4.0,               # Vegas上限閾値
+    mild_decrease_factor=0.85,    # 軽度輻輳時の減少係数（15%減少）
+    trend_sensitivity=0.1,        # トレンド検出感度
 )
+```
+
+**EMA統計と輻輳統計の取得:**
+
+```python
+# EMA統計情報（ノイズ除去されたレイテンシ）
+ema_stats = controller.get_ema_stats()
+print(f"平滑化レイテンシ: {ema_stats['latency']['value']}ms")
+print(f"レイテンシトレンド: {ema_stats['latency']['trend']}")  # 正=増加中、負=減少中
+print(f"レイテンシ分散: {ema_stats['latency']['variance']}")
+
+# 輻輳検出統計（Vegas-style）
+congestion_stats = controller.get_congestion_stats()
+print(f"ベースレイテンシ: {congestion_stats['base_latency_ms']}ms")
+print(f"輻輳レベル: {congestion_stats['congestion_level']}")  # none/mild/moderate/severe
+print(f"輻輳シグナル: {congestion_stats['congestion_signal']}")
 ```
 
 ### メトリクス収集

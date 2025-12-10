@@ -24,7 +24,11 @@ This framework is designed with a focus on large-scale, high-speed, and stable u
 * **MABEL v1.x Backward Compatibility**
   * Automatic version detection
 * **Advanced Concurrent Processing**
-  * Adaptive concurrency control with AIMD (Additive Increase Multiplicative Decrease) algorithm
+  * Adaptive concurrency control inspired by TCP congestion control (Vegas/Reno/BBR)
+    * Two-phase control: Slow Start (exponential increase) and Congestion Avoidance (linear increase)
+    * Noise reduction and trend detection using EMA (Exponential Moving Average)
+    * Vegas-style proactive congestion detection
+    * Graduated decrease logic (ignores mild congestion, responds immediately to severe congestion)
   * Real-time metrics collection from vLLM/SGLang backends
   * Dynamic request batching for optimal throughput
   * Automatic latency-based optimization
