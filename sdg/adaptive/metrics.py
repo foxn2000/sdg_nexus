@@ -109,7 +109,13 @@ class MetricsCollector:
             poll_interval_ms: Polling interval in milliseconds (default: 500)
             history_size: Number of historical metrics to retain (default: 100)
         """
+        # base_urlから末尾のスラッシュと /v1 を除去してメトリクスエンドポイントを構築
+        # vLLMとSGLangのメトリクスは /metrics にあり、/v1/metrics ではない
         self.base_url = base_url.rstrip("/")
+        # /v1 で終わる場合は除去
+        if self.base_url.endswith("/v1"):
+            self.base_url = self.base_url[:-3]
+
         self.metrics_type = metrics_type
         self.poll_interval = poll_interval_ms / 1000.0
         self.history_size = history_size
