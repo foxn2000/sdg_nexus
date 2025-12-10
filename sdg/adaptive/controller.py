@@ -341,9 +341,9 @@ class AdaptiveController:
         # AIMD parameters
         increase_step: int = 2,  # Additive increase per adjustment (CA phase)
         decrease_factor: float = 0.5,  # Multiplicative decrease factor (for errors)
-        # Adjustment sensitivity
-        latency_tolerance: float = 1.5,  # Trigger decrease if latency > target * tolerance
-        error_rate_threshold: float = 0.05,  # 5% error rate triggers decrease
+        # Adjustment sensitivity - more tolerant to avoid premature decrease
+        latency_tolerance: float = 2.0,  # Trigger decrease if latency > target * tolerance (was 1.5)
+        error_rate_threshold: float = 0.1,  # 10% error rate triggers decrease (was 0.05)
         # Timing
         adjustment_interval_ms: int = 1000,  # Minimum time between adjustments
         window_size: int = 50,  # Number of samples for averaging
@@ -352,12 +352,12 @@ class AdaptiveController:
         # Use legacy semaphore for backward compatibility
         use_dynamic_semaphore: bool = True,
         # Advanced parameters
-        ema_alpha: float = 0.3,  # EMA smoothing factor (0-1, higher = more reactive)
+        ema_alpha: float = 0.2,  # EMA smoothing factor - lower for more stability (was 0.3)
         slow_start_threshold: Optional[int] = None,  # Initial ssthresh
-        vegas_alpha: float = 2.0,  # Vegas lower threshold (packets)
-        vegas_beta: float = 4.0,  # Vegas upper threshold (packets)
-        mild_decrease_factor: float = 0.85,  # Decrease factor for latency spikes
-        trend_sensitivity: float = 0.1,  # Threshold for trend detection
+        vegas_alpha: float = 3.0,  # Vegas lower threshold - more tolerant (was 2.0)
+        vegas_beta: float = 6.0,  # Vegas upper threshold - more tolerant (was 4.0)
+        mild_decrease_factor: float = 0.92,  # Decrease factor for latency spikes - gentler (was 0.85)
+        trend_sensitivity: float = 0.15,  # Threshold for trend detection - less sensitive (was 0.1)
     ):
         """
         Initialize the adaptive controller.
@@ -403,14 +403,15 @@ class AdaptiveController:
         self.mild_decrease_factor = mild_decrease_factor
         self.trend_sensitivity = trend_sensitivity
 
-        # State - Start with slow start from initial_concurrency or min_concurrency
+        # State - Start with slow start from initial_concurrency or a reasonable default
         if initial_concurrency is not None:
             self._current: int = max(
                 min_concurrency, min(initial_concurrency, max_concurrency)
             )
         else:
-            # For slow start, begin conservatively
-            self._current: int = min_concurrency
+            # Start from a reasonable middle point instead of min_concurrency
+            # This prevents the concurrency from being too low at the start
+            self._current: int = max(min_concurrency, max_concurrency // 4)
 
         # Error tracking for immediate response
         self._recent_errors: int = 0
@@ -626,22 +627,22 @@ class AdaptiveController:
         # Immediate response for errors - bypass normal adjustment interval
         old_concurrency = self._current
 
-        if self._consecutive_errors >= 3:
-            # Multiple consecutive errors: aggressive reduction
+        if self._consecutive_errors >= 5:
+            # Multiple consecutive errors: aggressive reduction (was 3)
             new_concurrency = max(
                 self.min_concurrency, int(self._current * self.decrease_factor)
             )
             action = "immediate_md_consecutive_errors"
-        elif self._recent_errors >= 2:
-            # Multiple errors in window: moderate reduction
+        elif self._recent_errors >= 3:
+            # Multiple errors in window: moderate reduction (was 2)
             new_concurrency = max(
                 self.min_concurrency, int(self._current * self.mild_decrease_factor)
             )
             action = "immediate_md_multiple_errors"
         else:
-            # Single error: mild reduction
+            # Single error: very mild reduction - just reduce by 1
             new_concurrency = max(
-                self.min_concurrency, self._current - max(2, self.increase_step * 2)
+                self.min_concurrency, self._current - 1
             )
             action = "immediate_decrease_single_error"
 
@@ -883,14 +884,14 @@ class AdaptiveController:
             action = "decrease_moderate"
 
         elif congestion_level == "mild":
-            # Hold or very slight decrease for mild congestion
+            # Hold for mild congestion - don't decrease too quickly
             self._consecutive_good = 0
             self._consecutive_bad += 1
 
-            if self._consecutive_bad >= 3:
-                # Sustained mild congestion - slight decrease
+            if self._consecutive_bad >= 5:
+                # Sustained mild congestion - very slight decrease (was 3)
                 new_concurrency = max(
-                    self.min_concurrency, self._current - self.increase_step
+                    self.min_concurrency, self._current - 1  # Reduce by 1 instead of increase_step
                 )
                 action = "decrease_mild"
             else:
@@ -904,12 +905,12 @@ class AdaptiveController:
             self._consecutive_good += 1
 
             if self._phase == ControlPhase.SLOW_START:
-                # Exponential increase in slow start
+                # Exponential increase in slow start - more aggressive
                 if (
                     self._current < self._ssthresh
-                    and self._consecutive_good >= 2
+                    and self._consecutive_good >= 1  # Reduced from 2
                     and self._ema_latency.initialized
-                    and self._ema_latency.value < self.target_latency * 0.7
+                    and self._ema_latency.value < self.target_latency * 0.9  # Relaxed from 0.7
                 ):
                     # Double the concurrency (exponential)
                     new_concurrency = min(self.max_concurrency, self._current * 2)
@@ -919,15 +920,19 @@ class AdaptiveController:
                     if new_concurrency >= self._ssthresh:
                         self._phase = ControlPhase.CONGESTION_AVOIDANCE
                         action = "ss_to_ca"
-                else:
-                    # Conservative increase if not fully warmed up
+                elif self._consecutive_good >= 1:
+                    # More aggressive linear increase in slow start
                     new_concurrency = min(
-                        self.max_concurrency, self._current + self.increase_step
+                        self.max_concurrency, self._current + self.increase_step * 2
                     )
                     action = "ss_linear"
+                else:
+                    # Hold if no good samples yet
+                    new_concurrency = self._current
+                    action = "ss_hold"
             else:
                 # Congestion avoidance - linear increase
-                if self._consecutive_good >= 2:
+                if self._consecutive_good >= 1:  # Reduced from 2
                     new_concurrency = min(
                         self.max_concurrency, self._current + self.increase_step
                     )

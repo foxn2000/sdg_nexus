@@ -36,6 +36,8 @@ This framework is designed with a focus on large-scale, high-speed, and stable u
   * Define and operate multiple LLM models simultaneously
 * **Flexible I/O Support**
   * JSONL and CSV format support in streaming and batch modes
+  * Direct loading of Hugging Face Datasets
+  * Key mapping feature for improved dataset compatibility
 * **Robust Error Handling**
   * Flexible error handling with retry mechanisms
 * **Performance Optimization**

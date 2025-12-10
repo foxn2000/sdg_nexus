@@ -42,6 +42,12 @@ YAMLブループリントを入力データセットに対して実行
   --help.ja                このヘルプメッセージを日本語で表示して終了
   --save-intermediate      中間出力を保存
 
+Hugging Face データセットオプション:
+  --dataset DATASET       Hugging Face データセット名
+  --subset SUBSET         データセットのサブセット名
+  --split SPLIT           データセットの分割 (デフォルト: train)
+  --mapping MAPPING       'orig:new' 形式のキーマッピング (複数回使用可)
+
 ストリーミングモードオプション（デフォルトモード）:
   --max-concurrent MAX_CONCURRENT
                           並行処理する最大行数 (デフォルト: 8)
@@ -128,6 +134,10 @@ SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
   --input INPUT         入力データセット (.jsonl または .csv)
   --output OUTPUT       出力JSONLファイル
   --save-intermediate   中間出力を保存
+  --dataset DATASET     Hugging Face データセット名
+  --subset SUBSET       データセットのサブセット名
+  --split SPLIT         データセットの分割 (デフォルト: train)
+  --mapping MAPPING     'orig:new' 形式のキーマッピング (複数回使用可)
   --max-concurrent MAX_CONCURRENT
                         並行処理する最大行数 (デフォルト: 8)
   --no-progress         プログレス表示を無効化
@@ -174,10 +184,22 @@ SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
 
 def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     p.add_argument("--yaml", required=True, help="YAML blueprint path")
-    p.add_argument("--input", required=True, help="Input dataset (.jsonl or .csv)")
+    p.add_argument("--input", help="Input dataset (.jsonl or .csv)")
     p.add_argument("--output", required=True, help="Output JSONL file")
     p.add_argument(
         "--save-intermediate", action="store_true", help="Save intermediate outputs"
+    )
+
+    # Hugging Face Dataset options
+    p.add_argument("--dataset", help="Hugging Face dataset name")
+    p.add_argument("--subset", help="Dataset subset name")
+    p.add_argument(
+        "--split", default="train", help="Dataset split (default: train)"
+    )
+    p.add_argument(
+        "--mapping",
+        action="append",
+        help="Key mapping in format 'orig:new' (can be used multiple times)",
     )
     p.add_argument(
         "--help.ja", action="store_true", help="Show this help message in Japanese"
@@ -359,6 +381,27 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 def _execute_run(args):
     """Execute the run command based on args"""
+    # Validation
+    if not args.input and not args.dataset:
+        print("Error: Either --input or --dataset must be provided.", file=sys.stderr)
+        sys.exit(1)
+    if args.input and args.dataset:
+        print("Error: Cannot specify both --input and --dataset.", file=sys.stderr)
+        sys.exit(1)
+
+    # Parse mapping
+    mapping = {}
+    if args.mapping:
+        for m in args.mapping:
+            if ":" not in m:
+                print(
+                    f"Error: Invalid mapping format '{m}'. Expected 'orig:new'.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            k, v = m.split(":", 1)
+            mapping[k] = v
+
     # Resolve legacy option aliases
     max_concurrent = (
         args.max_concurrent_rows
@@ -379,6 +422,10 @@ def _execute_run(args):
             min_batch=args.min_batch,
             target_latency_ms=args.target_latency_ms,
             save_intermediate=args.save_intermediate,
+            dataset_name=args.dataset,
+            subset=args.subset,
+            split=args.split,
+            mapping=mapping,
         )
     elif args.adaptive:
         # Adaptive streaming mode: dynamic concurrency control
@@ -418,6 +465,11 @@ def _execute_run(args):
                 enable_memory_optimization=args.enable_memory_optimization,
                 max_cache_size=args.max_cache_size,
                 enable_memory_monitoring=args.enable_memory_monitoring,
+                # HF Dataset options
+                dataset_name=args.dataset,
+                subset=args.subset,
+                split=args.split,
+                mapping=mapping,
             )
         else:
             run_streaming_adaptive(
@@ -445,6 +497,11 @@ def _execute_run(args):
                 enable_memory_optimization=args.enable_memory_optimization,
                 max_cache_size=args.max_cache_size,
                 enable_memory_monitoring=args.enable_memory_monitoring,
+                # HF Dataset options
+                dataset_name=args.dataset,
+                subset=args.subset,
+                split=args.split,
+                mapping=mapping,
             )
     else:
         # Streaming mode: row-by-row processing with fixed concurrency (default)
@@ -471,6 +528,11 @@ def _execute_run(args):
             enable_memory_monitoring=args.enable_memory_monitoring,
             gc_interval=args.gc_interval,
             memory_threshold_mb=args.memory_threshold_mb,
+            # HF Dataset options
+            dataset_name=args.dataset,
+            subset=args.subset,
+            split=args.split,
+            mapping=mapping,
         )
 
 

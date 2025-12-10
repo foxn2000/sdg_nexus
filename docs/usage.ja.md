@@ -35,6 +35,9 @@ sdg run --yaml <YAMLファイル> --input <入力ファイル> --output <出力�
 
 # 例
 sdg run --yaml examples/sdg_demo.yaml --input examples/data/input.jsonl --output output/result.jsonl
+
+# Hugging Face Datasetsを使用する例
+sdg run --yaml examples/sdg_demo.yaml --dataset squad --split validation --output output/result.jsonl
 ```
 
 ### 実行モード
@@ -61,6 +64,10 @@ sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --no-progr
 |-----------|-----------|------|
 | `--max-concurrent` | 8 | 同時処理行数の上限（固定） |
 | `--no-progress` | false | 進捗表示を無効化 |
+| `--dataset` | - | Hugging Faceデータセット名 |
+| `--subset` | - | データセットサブセット名 |
+| `--split` | train | データセットスプリット |
+| `--mapping` | - | キーマッピング（`orig:new`形式、複数指定可） |
 
 **特徴:**
 - 実行中は並行数が固定
@@ -1047,6 +1054,55 @@ UserInput,Category
 AIとは何ですか？,tech
 天気について教えて,general
 ```
+
+#### Hugging Face Datasets
+
+Hugging Face Hub上のデータセットを直接読み込むことができます。
+
+**基本的な使用方法:**
+
+```bash
+# squadデータセットのvalidationスプリットを使用
+sdg run --yaml pipeline.yaml --dataset squad --split validation --output result.jsonl
+
+# サブセットを指定する場合
+sdg run --yaml pipeline.yaml --dataset glue --subset mrpc --split train --output result.jsonl
+```
+
+**キーマッピング機能:**
+
+データセットのキー名とパイプラインで期待される入力キー名が異なる場合、`--mapping` オプションを使用してキーをマッピングできます。
+
+```bash
+# 例: データセットの "context" を "text" として、"question" を "query" として扱う
+sdg run --yaml pipeline.yaml \
+  --dataset squad \
+  --mapping context:text \
+  --mapping question:query \
+  --output result.jsonl
+
+# 複数のキーマッピングを指定
+sdg run --yaml pipeline.yaml \
+  --dataset my_dataset \
+  --mapping original_field:UserInput \
+  --mapping label:Category \
+  --output result.jsonl
+```
+
+**オプション:**
+
+| オプション | デフォルト | 説明 |
+|-----------|-----------|------|
+| `--dataset` | - | Hugging Face データセット名（必須） |
+| `--subset` | - | データセットのサブセット名（オプション） |
+| `--split` | train | データセットのスプリット（train/validation/test等） |
+| `--mapping` | - | キーマッピング（`orig:new`形式、複数指定可） |
+
+**注意事項:**
+
+- `--dataset` を指定した場合、`--input` は指定できません
+- キーマッピングは、データセットの各行に対して適用されます
+- マッピングされたキーは、パイプラインのYAMLファイル内で使用できます
 
 ### 出力データ形式
 

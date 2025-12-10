@@ -35,6 +35,9 @@ sdg run --yaml <YAML file> --input <input file> --output <output file>
 
 # Example
 sdg run --yaml examples/sdg_demo.yaml --input examples/data/input.jsonl --output output/result.jsonl
+
+# Using Hugging Face Datasets
+sdg run --yaml examples/sdg_demo.yaml --dataset squad --split validation --output output/result.jsonl
 ```
 
 ### Execution Modes
@@ -61,6 +64,10 @@ sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --no-progr
 |--------|---------|-------------|
 | `--max-concurrent` | 8 | Maximum number of concurrent rows (fixed) |
 | `--no-progress` | false | Disable progress display |
+| `--dataset` | - | Hugging Face dataset name |
+| `--subset` | - | Dataset subset name |
+| `--split` | train | Dataset split |
+| `--mapping` | - | Key mapping (`orig:new` format, can be used multiple times) |
 
 **Features:**
 - Fixed concurrency level throughout execution
@@ -1047,6 +1054,55 @@ UserInput,Category
 What is AI?,tech
 Tell me about the weather,general
 ```
+
+#### Hugging Face Datasets
+
+You can directly load datasets from Hugging Face Hub.
+
+**Basic Usage:**
+
+```bash
+# Use the validation split of the squad dataset
+sdg run --yaml pipeline.yaml --dataset squad --split validation --output result.jsonl
+
+# Specify a subset
+sdg run --yaml pipeline.yaml --dataset glue --subset mrpc --split train --output result.jsonl
+```
+
+**Key Mapping Feature:**
+
+When the dataset's key names differ from the input keys expected by your pipeline, you can use the `--mapping` option to map keys.
+
+```bash
+# Example: Map dataset's "context" to "text" and "question" to "query"
+sdg run --yaml pipeline.yaml \
+  --dataset squad \
+  --mapping context:text \
+  --mapping question:query \
+  --output result.jsonl
+
+# Multiple key mappings
+sdg run --yaml pipeline.yaml \
+  --dataset my_dataset \
+  --mapping original_field:UserInput \
+  --mapping label:Category \
+  --output result.jsonl
+```
+
+**Options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--dataset` | - | Hugging Face dataset name (required) |
+| `--subset` | - | Dataset subset name (optional) |
+| `--split` | train | Dataset split (train/validation/test, etc.) |
+| `--mapping` | - | Key mapping (`orig:new` format, can be used multiple times) |
+
+**Notes:**
+
+- When `--dataset` is specified, `--input` cannot be used
+- Key mappings are applied to each row in the dataset
+- Mapped keys can be used in your pipeline YAML file
 
 ### Output Data Format
 

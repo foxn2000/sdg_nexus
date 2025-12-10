@@ -13,6 +13,7 @@ dependencies = [
     "aiofiles>=23.2.0",
     "aiohttp>=3.9.0",
     "psutil>=5.9.0",
+    "datasets>=2.14.0",
 ]
 
 [project.scripts]

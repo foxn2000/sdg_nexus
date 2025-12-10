@@ -380,6 +380,64 @@ def read_csv(path: str) -> List[Dict[str, Any]]:
         return list(csv.DictReader(f))
 
 
+def read_hf_dataset(
+    dataset_name: str, subset: Optional[str] = None, split: str = "train"
+) -> List[Dict[str, Any]]:
+    """
+    Hugging Face Datasetを読み込む。
+
+    Args:
+        dataset_name: データセット名
+        subset: サブセット名（オプション）
+        split: スプリット名（デフォルト: train）
+
+    Returns:
+        辞書のリスト
+    """
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        raise ImportError(
+            "datasets library is required to load Hugging Face datasets. "
+            "Please install it with `pip install datasets`."
+        )
+
+    print(
+        f"Loading Hugging Face dataset: {dataset_name} (subset={subset}, split={split})...",
+        file=sys.stderr,
+    )
+    ds = load_dataset(dataset_name, name=subset, split=split)
+
+    # Convert to list of dicts
+    return [item for item in ds]
+
+
+def apply_mapping(
+    dataset: List[Dict[str, Any]], mapping: Dict[str, str]
+) -> List[Dict[str, Any]]:
+    """
+    データセットのキーをマッピングに従って変更する。
+
+    Args:
+        dataset: データセット（辞書のリスト）
+        mapping: マッピング辞書 {old_key: new_key}
+
+    Returns:
+        キーが変更された新しいデータセット
+    """
+    if not mapping:
+        return dataset
+
+    mapped_dataset = []
+    for item in dataset:
+        new_item = item.copy()
+        for old_key, new_key in mapping.items():
+            if old_key in new_item:
+                new_item[new_key] = new_item.pop(old_key)
+        mapped_dataset.append(new_item)
+    return mapped_dataset
+
+
 def write_jsonl(path: str, rows: Iterable[Dict[str, Any]]) -> None:
     """
     JSONLファイルに書き込む（同期版）。
@@ -755,7 +813,7 @@ async def _run_streaming_adaptive_batched_async(
 
 def run_streaming_adaptive_batched(
     yaml_path: str,
-    input_path: str,
+    input_path: Optional[str],
     output_path: str,
     max_concurrent: int = 64,
     min_concurrent: int = 1,
@@ -780,6 +838,11 @@ def run_streaming_adaptive_batched(
     enable_memory_optimization: bool = False,
     max_cache_size: int = 500,
     enable_memory_monitoring: bool = False,
+    # HF Dataset options
+    dataset_name: Optional[str] = None,
+    subset: Optional[str] = None,
+    split: str = "train",
+    mapping: Optional[Dict[str, str]] = None,
 ):
     """
     バッチング付き適応的並行性制御ストリーミング版パイプライン実行
@@ -810,6 +873,10 @@ def run_streaming_adaptive_batched(
         max_cache_size: コンテキストキャッシュの最大サイズ
         enable_memory_monitoring: メモリ使用状況監視を有効化
         clean_output: 出力JSONLをクリーニングするか（デフォルト: True）
+        dataset_name: Hugging Faceデータセット名
+        subset: データセットサブセット
+        split: データセットスプリット
+        mapping: キーマッピング辞書
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
@@ -825,12 +892,21 @@ def run_streaming_adaptive_batched(
     }
 
     # load data
-    if input_path.endswith(".jsonl"):
-        ds = read_jsonl(input_path)
-    elif input_path.endswith(".csv"):
-        ds = read_csv(input_path)
+    if input_path:
+        if input_path.endswith(".jsonl"):
+            ds = read_jsonl(input_path)
+        elif input_path.endswith(".csv"):
+            ds = read_csv(input_path)
+        else:
+            raise ValueError("Unsupported input format. Use .jsonl or .csv")
+    elif dataset_name:
+        ds = read_hf_dataset(dataset_name, subset, split)
     else:
-        raise ValueError("Unsupported input format. Use .jsonl or .csv")
+        raise ValueError("Either input_path or dataset_name must be provided")
+
+    # Apply mapping
+    if mapping:
+        ds = apply_mapping(ds, mapping)
 
     # run
     asyncio.run(
@@ -860,7 +936,7 @@ def run_streaming_adaptive_batched(
 
 def run_streaming_adaptive(
     yaml_path: str,
-    input_path: str,
+    input_path: Optional[str],
     output_path: str,
     max_concurrent: int = 64,
     min_concurrent: int = 1,
@@ -883,6 +959,11 @@ def run_streaming_adaptive(
     enable_memory_optimization: bool = False,
     max_cache_size: int = 500,
     enable_memory_monitoring: bool = False,
+    # HF Dataset options
+    dataset_name: Optional[str] = None,
+    subset: Optional[str] = None,
+    split: str = "train",
+    mapping: Optional[Dict[str, str]] = None,
 ):
     """
     適応的並行性制御付きストリーミング版パイプライン実行
@@ -911,6 +992,10 @@ def run_streaming_adaptive(
         max_cache_size: コンテキストキャッシュの最大サイズ
         enable_memory_monitoring: メモリ使用状況監視を有効化
         clean_output: 出力JSONLをクリーニングするか（デフォルト: True）
+        dataset_name: Hugging Faceデータセット名
+        subset: データセットサブセット
+        split: データセットスプリット
+        mapping: キーマッピング辞書
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
@@ -926,12 +1011,21 @@ def run_streaming_adaptive(
     }
 
     # load data
-    if input_path.endswith(".jsonl"):
-        ds = read_jsonl(input_path)
-    elif input_path.endswith(".csv"):
-        ds = read_csv(input_path)
+    if input_path:
+        if input_path.endswith(".jsonl"):
+            ds = read_jsonl(input_path)
+        elif input_path.endswith(".csv"):
+            ds = read_csv(input_path)
+        else:
+            raise ValueError("Unsupported input format. Use .jsonl or .csv")
+    elif dataset_name:
+        ds = read_hf_dataset(dataset_name, subset, split)
     else:
-        raise ValueError("Unsupported input format. Use .jsonl or .csv")
+        raise ValueError("Either input_path or dataset_name must be provided")
+
+    # Apply mapping
+    if mapping:
+        ds = apply_mapping(ds, mapping)
 
     # run
     asyncio.run(
@@ -959,7 +1053,7 @@ def run_streaming_adaptive(
 
 def run_streaming(
     yaml_path: str,
-    input_path: str,
+    input_path: Optional[str],
     output_path: str,
     max_concurrent: int = 8,
     save_intermediate: bool = False,
@@ -980,6 +1074,11 @@ def run_streaming(
     enable_memory_monitoring: bool = False,
     gc_interval: int = 100,
     memory_threshold_mb: int = 1024,
+    # HF Dataset options
+    dataset_name: Optional[str] = None,
+    subset: Optional[str] = None,
+    split: str = "train",
+    mapping: Optional[Dict[str, str]] = None,
 ):
     """
     ストリーミング版パイプライン実行
@@ -1006,6 +1105,10 @@ def run_streaming(
         gc_interval: ガベージコレクション実行間隔（処理行数）
         memory_threshold_mb: メモリ使用量警告閾値（MB）
         clean_output: 出力JSONLをクリーニングするか（デフォルト: True）
+        dataset_name: Hugging Faceデータセット名
+        subset: データセットサブセット
+        split: データセットスプリット
+        mapping: キーマッピング辞書
 
     Note:
         出力順序は処理完了順となるため、入力順序と異なる場合がある。
@@ -1021,12 +1124,21 @@ def run_streaming(
     }
 
     # load data
-    if input_path.endswith(".jsonl"):
-        ds = read_jsonl(input_path)
-    elif input_path.endswith(".csv"):
-        ds = read_csv(input_path)
+    if input_path:
+        if input_path.endswith(".jsonl"):
+            ds = read_jsonl(input_path)
+        elif input_path.endswith(".csv"):
+            ds = read_csv(input_path)
+        else:
+            raise ValueError("Unsupported input format. Use .jsonl or .csv")
+    elif dataset_name:
+        ds = read_hf_dataset(dataset_name, subset, split)
     else:
-        raise ValueError("Unsupported input format. Use .jsonl or .csv")
+        raise ValueError("Either input_path or dataset_name must be provided")
+
+    # Apply mapping
+    if mapping:
+        ds = apply_mapping(ds, mapping)
 
     # run
     asyncio.run(
@@ -1050,24 +1162,39 @@ def run_streaming(
 
 def run(
     yaml_path: str,
-    input_path: str,
+    input_path: Optional[str],
     output_path: str,
     max_batch: int,
     min_batch: int,
     target_latency_ms: int,
     save_intermediate: bool,
+    # HF Dataset options
+    dataset_name: Optional[str] = None,
+    subset: Optional[str] = None,
+    split: str = "train",
+    mapping: Optional[Dict[str, str]] = None,
 ):
     """
     従来のブロック単位一括処理パイプライン実行（後方互換性のため維持）
     """
     cfg = load_config(yaml_path)
     # load data
-    if input_path.endswith(".jsonl"):
-        ds = read_jsonl(input_path)
-    elif input_path.endswith(".csv"):
-        ds = read_csv(input_path)
+    if input_path:
+        if input_path.endswith(".jsonl"):
+            ds = read_jsonl(input_path)
+        elif input_path.endswith(".csv"):
+            ds = read_csv(input_path)
+        else:
+            raise ValueError("Unsupported input format. Use .jsonl or .csv")
+    elif dataset_name:
+        ds = read_hf_dataset(dataset_name, subset, split)
     else:
-        raise ValueError("Unsupported input format. Use .jsonl or .csv")
+        raise ValueError("Either input_path or dataset_name must be provided")
+
+    # Apply mapping
+    if mapping:
+        ds = apply_mapping(ds, mapping)
+
     # run
     res = asyncio.run(
         run_pipeline(
