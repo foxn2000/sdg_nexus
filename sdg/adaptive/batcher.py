@@ -68,7 +68,9 @@ class RequestBatcher(Generic[T]):
         self,
         batch_processor: Callable[[List[Dict[str, Any]]], Coroutine[Any, Any, List[T]]],
         max_batch_size: int = 64,
-        max_wait_ms: int = 50,
+        # デフォルト0ms: 標準API（OpenAI等）では即時送信が最適
+        # vLLM/SGLang等の真のバッチ処理バックエンドを使用する場合のみ増加を検討
+        max_wait_ms: int = 0,
         max_tokens_per_batch: Optional[int] = None,
         token_estimator: Optional[Callable[[Dict[str, Any]], int]] = None,
         enabled: bool = True,
@@ -80,7 +82,9 @@ class RequestBatcher(Generic[T]):
             batch_processor: Async function that processes a list of payloads
                             and returns a list of results
             max_batch_size: Maximum number of requests per batch (default: 64)
-            max_wait_ms: Maximum time to wait for batch formation (default: 50ms)
+            max_wait_ms: Maximum time to wait for batch formation (default: 0ms)
+                         Set to higher values (e.g., 50ms) only when using backends
+                         that support true batch processing (vLLM, SGLang, etc.)
             max_tokens_per_batch: Optional maximum tokens per batch
             token_estimator: Optional function to estimate tokens for a request
             enabled: Whether batching is enabled (False = process immediately)
@@ -349,7 +353,9 @@ class AdaptiveRequestBatcher(RequestBatcher[T]):
         controller: Optional[Any] = None,  # AdaptiveController
         max_batch_size: int = 64,
         min_batch_size: int = 1,
-        max_wait_ms: int = 50,
+        # デフォルト0ms: 標準API（OpenAI等）では即時送信が最適
+        # vLLM/SGLang等の真のバッチ処理バックエンドを使用する場合のみ増加を検討
+        max_wait_ms: int = 0,
         max_tokens_per_batch: Optional[int] = None,
         token_estimator: Optional[Callable[[Dict[str, Any]], int]] = None,
         enabled: bool = True,
@@ -362,7 +368,9 @@ class AdaptiveRequestBatcher(RequestBatcher[T]):
             controller: Optional AdaptiveController for dynamic sizing
             max_batch_size: Maximum batch size (default: 64)
             min_batch_size: Minimum batch size (default: 1)
-            max_wait_ms: Maximum wait time in ms (default: 50)
+            max_wait_ms: Maximum wait time in ms (default: 0 for immediate dispatch)
+                         Set to higher values (e.g., 50ms) only when using backends
+                         that support true batch processing (vLLM, SGLang, etc.)
             max_tokens_per_batch: Optional token limit per batch
             token_estimator: Optional token estimation function
             enabled: Whether batching is enabled

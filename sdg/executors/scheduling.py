@@ -351,26 +351,26 @@ class StreamingContextManager:
     ストリーミング対応コンテキストマネージャ
 
     大規模データセット処理時のメモリ効率を向上させるため、
-    LRUキャッシュを使用してコンテキストを管理します。
-    処理が完了したコンテキストは自動的に解放されます。
+    アクティブなコンテキストを辞書で管理します。
+    処理が完了したコンテキストは明示的に解放されます。
 
     Features:
-        - LRUキャッシュによるコンテキスト保持
-        - 処理完了時の自動解放
-        - 参照カウントによる安全な解放
+        - アクティブセット方式によるコンテキスト保持（evictなし）
+        - 処理完了時の明示的な解放
+        - asyncio.Lockによるスレッドセーフなアクセス
         - オプションのメモリ監視
 
     Example:
         ```python
         ctx_manager = StreamingContextManager(
-            config=MemoryConfig(max_cache_size=100, enable_memory_optimization=True)
+            config=MemoryConfig(enable_memory_optimization=True)
         )
 
         # コンテキストを取得（なければ作成）
-        ctx = ctx_manager.get_or_create(row_index, initial_data)
+        ctx = await ctx_manager.get_or_create(row_index, initial_data)
 
-        # 処理完了時にマーク
-        ctx_manager.mark_completed(row_index)
+        # 処理完了時にマーク（コンテキストが解放される）
+        await ctx_manager.mark_completed(row_index)
         ```
     """
 
@@ -380,9 +380,8 @@ class StreamingContextManager:
             config: メモリ効率化設定（Noneの場合はデフォルト設定を使用）
         """
         self.config = config or MemoryConfig()
-        self._cache: LRUCache[Dict[str, Any]] = LRUCache(
-            max_size=self.config.max_cache_size
-        )
+        # LRUCacheの代わりにアクティブなコンテキストを保持する辞書を使用
+        self._active_contexts: Dict[str, Dict[str, Any]] = {}
         self._completed: set = set()
         self._lock = asyncio.Lock()
         self._processed_count = 0
@@ -407,6 +406,7 @@ class StreamingContextManager:
         コンテキストを取得（存在しない場合は作成）
 
         メモリ最適化が無効の場合は常に新しい辞書を返します。
+        アクティブセット方式のため、処理中のコンテキストは自動削除されません。
 
         Args:
             row_index: 行インデックス
@@ -422,18 +422,13 @@ class StreamingContextManager:
         key = str(row_index)
 
         async with self._lock:
-            # キャッシュから取得を試みる
-            cached = self._cache.get(key)
-            if cached is not None:
-                return cached
+            # アクティブコンテキストから取得を試みる
+            if key in self._active_contexts:
+                return self._active_contexts[key]
 
-            # 新規作成してキャッシュに追加
+            # 新規作成してアクティブコンテキストに追加
             ctx = dict(initial_data or {})
-            evicted = self._cache.put(key, ctx)
-
-            # 削除されたコンテキストの参照をクリア
-            if evicted is not None:
-                evicted.clear()
+            self._active_contexts[key] = ctx
 
             return ctx
 
@@ -441,7 +436,7 @@ class StreamingContextManager:
         """
         行の処理完了をマーク
 
-        メモリ最適化が有効な場合、完了した行のコンテキストを解放します。
+        メモリ最適化が有効な場合、完了した行のコンテキストを明示的に解放します。
 
         Args:
             row_index: 完了した行のインデックス
@@ -455,9 +450,10 @@ class StreamingContextManager:
             self._completed.add(row_index)
             self._processed_count += 1
 
-            # キャッシュから削除して解放
-            removed = self._cache.remove(key)
-            if removed is not None:
+            # アクティブコンテキストから削除して解放
+            if key in self._active_contexts:
+                removed = self._active_contexts[key]
+                del self._active_contexts[key]
                 removed.clear()
 
             # 定期的なガベージコレクション
@@ -471,7 +467,10 @@ class StreamingContextManager:
     async def release_all(self):
         """全てのコンテキストを解放"""
         async with self._lock:
-            self._cache.clear()
+            # 全てのアクティブコンテキストをクリア
+            for ctx in self._active_contexts.values():
+                ctx.clear()
+            self._active_contexts.clear()
             self._completed.clear()
             gc.collect()
 
@@ -485,7 +484,7 @@ class StreamingContextManager:
         stats = {
             "processed_count": self._processed_count,
             "completed_count": len(self._completed),
-            "cache_stats": self._cache.get_stats(),
+            "active_contexts_count": len(self._active_contexts),
             "memory_optimization_enabled": self.config.enable_memory_optimization,
         }
 

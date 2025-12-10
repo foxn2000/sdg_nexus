@@ -18,7 +18,9 @@ from .executors import (
     run_pipeline_streaming_adaptive_batched,
     StreamingResult,
 )
-from .utils import clean_jsonl_line
+
+# clean_jsonl_line is no longer used in AsyncBufferedWriter.write/write_many
+# since Dict input with json.dumps guarantees valid JSON format
 
 
 class AsyncBufferedWriter:
@@ -160,24 +162,16 @@ class AsyncBufferedWriter:
 
         Returns:
             書き込みに成功した場合はTrue、失敗した場合はFalse
+
+        Note:
+            入力dataはDict型であり、json.dumpsでシリアライズした時点で
+            有効なJSON形式が保証されるため、clean_jsonl_lineによる
+            再パース・正規化処理はスキップされる（パフォーマンス最適化）。
         """
         try:
             line = self._serializer(data)
-
-            # クリーニングを適用
-            if self._clean_output:
-                cleaned = clean_jsonl_line(line, verbose=False)
-                if cleaned is None:
-                    self._total_errors += 1
-                    print(
-                        f"Cleaning error: Invalid JSON could not be cleaned",
-                        file=sys.stderr,
-                    )
-                    return False
-                line = cleaned
-                if line != self._serializer(data):
-                    self._total_cleaned += 1
-
+            # 入力がDictでシリアライズが成功した場合、有効なJSON形式であることが保証される
+            # clean_jsonl_lineによる再パース・正規化は不要（CPUリソースの節約）
             line = line + "\n"
         except Exception as e:
             self._total_errors += 1
@@ -205,6 +199,11 @@ class AsyncBufferedWriter:
 
         Returns:
             正常に追加されたデータの件数
+
+        Note:
+            入力dataはDict型であり、json.dumpsでシリアライズした時点で
+            有効なJSON形式が保証されるため、clean_jsonl_lineによる
+            再パース・正規化処理はスキップされる（パフォーマンス最適化）。
         """
         success_count = 0
         lines: List[str] = []
@@ -212,21 +211,8 @@ class AsyncBufferedWriter:
         for data in data_list:
             try:
                 line = self._serializer(data)
-
-                # クリーニングを適用
-                if self._clean_output:
-                    cleaned = clean_jsonl_line(line, verbose=False)
-                    if cleaned is None:
-                        self._total_errors += 1
-                        print(
-                            f"Cleaning error: Invalid JSON could not be cleaned",
-                            file=sys.stderr,
-                        )
-                        continue
-                    line = cleaned
-                    if line != self._serializer(data):
-                        self._total_cleaned += 1
-
+                # 入力がDictでシリアライズが成功した場合、有効なJSON形式であることが保証される
+                # clean_jsonl_lineによる再パース・正規化は不要（CPUリソースの節約）
                 line = line + "\n"
                 lines.append(line)
                 success_count += 1

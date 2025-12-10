@@ -538,7 +538,10 @@ async def run_pipeline_streaming_adaptive_batched(
     target_queue_depth: int = 32,
     metrics_type: str = "none",
     max_batch_size: int = 32,
-    max_wait_ms: int = 50,
+    # デフォルト0ms: OpenAI API等の標準エンドポイントでは即時送信が最適
+    # vLLM/SGLang等の真のバッチ処理バックエンドを使用する場合のみ、
+    # max_wait_ms を適切な値（例: 50ms）に設定してください
+    max_wait_ms: int = 0,
     save_intermediate: bool = False,
     # Phase 2: スケジューリングオプション（デフォルト無効）
     max_pending_tasks: int = 1000,
@@ -564,7 +567,9 @@ async def run_pipeline_streaming_adaptive_batched(
         target_queue_depth: 目標バックエンドキュー深度 (デフォルト: 32)
         metrics_type: メトリクスタイプ ("none", "vllm", "sglang")
         max_batch_size: 最大バッチサイズ (デフォルト: 32)
-        max_wait_ms: バッチ形成の最大待機時間 (ミリ秒、デフォルト: 50)
+        max_wait_ms: バッチ形成の最大待機時間 (ミリ秒、デフォルト: 0)
+                     標準APIでは0（即時送信）が最適。vLLM/SGLang等の
+                     真のバッチ処理バックエンドを使用する場合のみ増加を検討
         save_intermediate: 中間結果を保存するか
         max_pending_tasks: 最大保留タスク数（スケジューリング有効時）
         chunk_size: データセット分割サイズ（スケジューリング有効時）
@@ -639,6 +644,7 @@ async def run_pipeline_streaming_adaptive_batched(
 
     # モデルごとにバッチャーを作成
     batchers: Dict[str, AdaptiveRequestBatcher] = {}
+    batchers_lock = asyncio.Lock()  # 競合状態防止用のロック
 
     # Phase 2: 階層的タスクスケジューラの初期化
     scheduler_config = SchedulerConfig(
@@ -731,38 +737,52 @@ async def run_pipeline_streaming_adaptive_batched(
                         if isinstance(block, AIBlock):
                             # バッチャー経由でAIブロックを実行
                             model_key = block.model
+                            # 競合状態を防ぐためダブルチェックロッキングを使用
                             if model_key not in batchers:
-                                client = clients[model_key]
-                                model_def = cfg.model_by_name(model_key)
-                                req_params = dict((model_def.request_defaults or {}))
-                                req_params.update(block.params or {})
+                                async with batchers_lock:
+                                    # ロック取得後に再度チェック（ダブルチェック）
+                                    if model_key not in batchers:
+                                        client = clients[model_key]
+                                        model_def = cfg.model_by_name(model_key)
+                                        req_params = dict(
+                                            (model_def.request_defaults or {})
+                                        )
+                                        req_params.update(block.params or {})
 
-                                if block.mode == "json":
-                                    req_params["response_format"] = {
-                                        "type": "json_object"
-                                    }
+                                        if block.mode == "json":
+                                            req_params["response_format"] = {
+                                                "type": "json_object"
+                                            }
 
-                                # 最適化オプションからretry_on_empty設定を取得してrequest_paramsに反映
-                                if hasattr(cfg, "optimization") and cfg.optimization:
-                                    retry_on_empty = cfg.optimization.get(
-                                        "retry_on_empty", True
-                                    )
-                                    retry_cfg = dict(req_params.get("retry") or {})
-                                    retry_cfg["retry_on_empty"] = retry_on_empty
-                                    req_params["retry"] = retry_cfg
+                                        # 最適化オプションからretry_on_empty設定を取得してrequest_paramsに反映
+                                        if (
+                                            hasattr(cfg, "optimization")
+                                            and cfg.optimization
+                                        ):
+                                            retry_on_empty = cfg.optimization.get(
+                                                "retry_on_empty", True
+                                            )
+                                            retry_cfg = dict(
+                                                req_params.get("retry") or {}
+                                            )
+                                            retry_cfg["retry_on_empty"] = retry_on_empty
+                                            req_params["retry"] = retry_cfg
 
-                                processor = await create_batch_processor(
-                                    client, model_def.api_model, req_params
-                                )
-                                batchers[model_key] = AdaptiveRequestBatcher(
-                                    batch_processor=processor,
-                                    controller=controller,
-                                    max_batch_size=max_batch_size,
-                                    min_batch_size=1,
-                                    max_wait_ms=max_wait_ms,
-                                    enabled=True,
-                                )
-                                await batchers[model_key].start()
+                                        processor = await create_batch_processor(
+                                            client, model_def.api_model, req_params
+                                        )
+                                        # max_wait_ms=0 で即時送信を優先
+                                        # 標準API（OpenAI等）では待機によるバッチ化は
+                                        # スループット向上に寄与せずレイテンシが悪化するため
+                                        batchers[model_key] = AdaptiveRequestBatcher(
+                                            batch_processor=processor,
+                                            controller=controller,
+                                            max_batch_size=max_batch_size,
+                                            min_batch_size=1,
+                                            max_wait_ms=max_wait_ms,
+                                            enabled=True,
+                                        )
+                                        await batchers[model_key].start()
 
                             # メッセージ構築（グローバル変数も参照可能）
                             msgs = []
