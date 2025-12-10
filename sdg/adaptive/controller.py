@@ -412,6 +412,13 @@ class AdaptiveController:
             # For slow start, begin conservatively
             self._current: int = min_concurrency
 
+        # Error tracking for immediate response
+        self._recent_errors: int = 0
+        self._error_window_start: float = time.time()
+        self._error_window_duration: float = 5.0  # 5秒のエラーウィンドウ
+        self._consecutive_errors: int = 0
+        self._last_error_time: float = 0.0
+
         # Slow start threshold (ssthresh) - initially set high or to given value
         if slow_start_threshold is not None:
             self._ssthresh: int = slow_start_threshold
@@ -589,9 +596,105 @@ class AdaptiveController:
         if not is_error:
             self._update_ema(self._ema_latency, latency_ms)
             self._update_congestion_state(latency_ms)
+            self._consecutive_errors = 0
+        else:
+            # Track errors for immediate response
+            self._track_error()
 
         # Trigger adjustment if enough samples and interval passed
         self._maybe_adjust()
+
+    def _track_error(self) -> None:
+        """
+        Track error for immediate response.
+
+        Implements aggressive backoff when errors are detected:
+        - First error in window: decrease by mild_decrease_factor
+        - Consecutive errors: more aggressive decrease
+        """
+        now = time.time()
+
+        # Reset error window if expired
+        if now - self._error_window_start > self._error_window_duration:
+            self._recent_errors = 0
+            self._error_window_start = now
+
+        self._recent_errors += 1
+        self._consecutive_errors += 1
+        self._last_error_time = now
+
+        # Immediate response for errors - bypass normal adjustment interval
+        old_concurrency = self._current
+
+        if self._consecutive_errors >= 3:
+            # Multiple consecutive errors: aggressive reduction
+            new_concurrency = max(
+                self.min_concurrency, int(self._current * self.decrease_factor)
+            )
+            action = "immediate_md_consecutive_errors"
+        elif self._recent_errors >= 2:
+            # Multiple errors in window: moderate reduction
+            new_concurrency = max(
+                self.min_concurrency, int(self._current * self.mild_decrease_factor)
+            )
+            action = "immediate_md_multiple_errors"
+        else:
+            # Single error: mild reduction
+            new_concurrency = max(
+                self.min_concurrency, self._current - max(2, self.increase_step * 2)
+            )
+            action = "immediate_decrease_single_error"
+
+        if new_concurrency < old_concurrency:
+            self._ssthresh = max(self.min_concurrency, new_concurrency)
+            self._phase = ControlPhase.CONGESTION_AVOIDANCE
+            self._update_semaphore(old_concurrency, new_concurrency)
+            self._current = new_concurrency
+            self._record_adjustment(action)
+
+            # Reset consecutive good counter
+            self._consecutive_good = 0
+            self._consecutive_bad += 1
+
+    def force_decrease(self, factor: Optional[float] = None) -> int:
+        """
+        Force an immediate decrease in concurrency.
+
+        This can be called externally when errors or timeouts are detected.
+
+        Args:
+            factor: Decrease factor (default: use self.decrease_factor)
+
+        Returns:
+            New concurrency level
+        """
+        if factor is None:
+            factor = self.decrease_factor
+
+        old_concurrency = self._current
+        new_concurrency = max(self.min_concurrency, int(self._current * factor))
+
+        if new_concurrency < old_concurrency:
+            self._ssthresh = max(self.min_concurrency, new_concurrency)
+            self._phase = ControlPhase.CONGESTION_AVOIDANCE
+            self._update_semaphore(old_concurrency, new_concurrency)
+            self._current = new_concurrency
+            self._record_adjustment("force_decrease")
+            self._consecutive_good = 0
+            self._consecutive_bad += 1
+
+        return self._current
+
+    def get_available_slots(self) -> int:
+        """
+        Get the number of available slots in the semaphore.
+
+        Returns:
+            Number of available slots for new tasks
+        """
+        if self._dynamic_semaphore is not None:
+            return self._dynamic_semaphore.available
+        return self._current
 
     def update_with_metrics(self, metrics: BackendMetrics) -> None:
         """

@@ -353,7 +353,7 @@ async def run_pipeline_streaming_adaptive(
             fn_key = f"{block.exec}_{block.function or block.entrypoint}"
             python_functions[fn_key] = _load_python_function(block)
 
-    # AdaptiveController設定
+    # AdaptiveController設定 - 最大並行数から開始し、エラー時に下げる
     controller = AdaptiveController(
         min_concurrency=min_concurrent,
         max_concurrency=max_concurrent,
@@ -478,6 +478,73 @@ async def run_pipeline_streaming_adaptive(
                 if ctx_manager.is_enabled:
                     await ctx_manager.mark_completed(row_index)
 
+    async def progressive_task_launcher():
+        """
+        Progressive Task Launcher - セマフォ容量に応じて段階的にタスクを起動
+
+        全タスクを一度に起動するのではなく、現在のセマフォ容量に応じて
+        新しいタスクを追加する。エラー発生時はセマフォ容量が下がるため、
+        新規タスクの起動も自動的に抑制される。
+        """
+        tasks: List[asyncio.Task] = []
+        next_index = 0
+        active_count = 0
+
+        # 初期タスク起動（セマフォ容量分）
+        initial_capacity = controller.current_concurrency
+
+        while next_index < total or active_count > 0:
+            # 現在のセマフォ容量を取得
+            current_capacity = controller.current_concurrency
+            available_slots = controller.get_available_slots()
+
+            # 新しいタスクを起動できるスロット数を計算
+            # セマフォ待機中のタスク数を考慮
+            pending_tasks = active_count
+            slots_to_fill = max(
+                0,
+                min(
+                    current_capacity - pending_tasks,  # 現在の並行数制限
+                    available_slots,  # 利用可能なスロット
+                    total - next_index,  # 残りのタスク
+                ),
+            )
+
+            # 新しいタスクを起動
+            for _ in range(slots_to_fill):
+                if next_index < total:
+                    row_index = next_index
+                    row_data = dataset[row_index]
+                    task = asyncio.create_task(process_row(row_index, row_data))
+                    tasks.append(task)
+                    next_index += 1
+                    active_count += 1
+
+            # 少し待機してから次のチェック
+            if active_count > 0:
+                # 結果を待つ（タイムアウト付き）
+                try:
+                    result = await asyncio.wait_for(
+                        result_queue.get(), timeout=0.1  # 100ms待機
+                    )
+                    active_count -= 1
+                    yield result
+                except asyncio.TimeoutError:
+                    # タイムアウト時は次のループへ
+                    pass
+            else:
+                # アクティブなタスクがない場合は短い待機
+                await asyncio.sleep(0.01)
+
+        # 残りの結果を取得
+        while not result_queue.empty():
+            result = await result_queue.get()
+            yield result
+
+        # 全タスクの完了を待機
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     try:
         # メトリクス収集を開始（有効な場合）
         if metrics_collector is not None:
@@ -499,20 +566,10 @@ async def run_pipeline_streaming_adaptive(
             # すべてのタスク完了を待機
             await asyncio.gather(*tasks)
         else:
-            # 従来の動作: 全行のタスクを一度に起動
-            tasks = [
-                asyncio.create_task(process_row(i, row))
-                for i, row in enumerate(dataset)
-            ]
-
-            # 完了した結果を順次yield
-            while completed < total:
-                result = await result_queue.get()
+            # Progressive Task Launcher を使用してタスクを段階的に起動
+            async for result in progressive_task_launcher():
                 completed += 1
                 yield result
-
-            # すべてのタスク完了を待機
-            await asyncio.gather(*tasks)
 
     finally:
         # Phase 2: リソース解放
@@ -612,7 +669,7 @@ async def run_pipeline_streaming_adaptive_batched(
             fn_key = f"{block.exec}_{block.function or block.entrypoint}"
             python_functions[fn_key] = _load_python_function(block)
 
-    # AdaptiveController設定
+    # AdaptiveController設定 - 最大並行数から開始し、エラー時に下げる
     controller = AdaptiveController(
         min_concurrency=min_concurrent,
         max_concurrency=max_concurrent,
@@ -920,6 +977,62 @@ async def run_pipeline_streaming_adaptive_batched(
         if metrics_collector is not None:
             metrics_update_task = asyncio.create_task(update_metrics_loop())
 
+        async def progressive_task_launcher_batched():
+            """
+            Progressive Task Launcher (Batched版) - セマフォ容量に応じて段階的にタスクを起動
+            """
+            tasks: List[asyncio.Task] = []
+            next_index = 0
+            active_count = 0
+
+            while next_index < total or active_count > 0:
+                # 現在のセマフォ容量を取得
+                current_capacity = controller.current_concurrency
+                available_slots = controller.get_available_slots()
+
+                # 新しいタスクを起動できるスロット数を計算
+                pending_tasks = active_count
+                slots_to_fill = max(
+                    0,
+                    min(
+                        current_capacity - pending_tasks,
+                        available_slots,
+                        total - next_index,
+                    ),
+                )
+
+                # 新しいタスクを起動
+                for _ in range(slots_to_fill):
+                    if next_index < total:
+                        row_index = next_index
+                        row_data = dataset[row_index]
+                        task = asyncio.create_task(
+                            process_row_batched(row_index, row_data)
+                        )
+                        tasks.append(task)
+                        next_index += 1
+                        active_count += 1
+
+                # 結果を待つ
+                if active_count > 0:
+                    try:
+                        result = await asyncio.wait_for(result_queue.get(), timeout=0.1)
+                        active_count -= 1
+                        yield result
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(0.01)
+
+            # 残りの結果を取得
+            while not result_queue.empty():
+                result = await result_queue.get()
+                yield result
+
+            # 全タスクの完了を待機
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
         if enable_scheduling:
             # Phase 2: 階層的スケジューリングでタスクを段階的に起動
             tasks = []
@@ -936,20 +1049,10 @@ async def run_pipeline_streaming_adaptive_batched(
             # すべてのタスク完了を待機
             await asyncio.gather(*tasks)
         else:
-            # 従来の動作: 全行のタスクを一度に起動
-            tasks = [
-                asyncio.create_task(process_row_batched(i, row))
-                for i, row in enumerate(dataset)
-            ]
-
-            # 完了した結果を順次yield
-            while completed < total:
-                result = await result_queue.get()
+            # Progressive Task Launcher を使用してタスクを段階的に起動
+            async for result in progressive_task_launcher_batched():
                 completed += 1
                 yield result
-
-            # すべてのタスク完了を待機
-            await asyncio.gather(*tasks)
 
     finally:
         # Phase 2: リソース解放
