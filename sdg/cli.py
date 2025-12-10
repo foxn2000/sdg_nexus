@@ -42,6 +42,10 @@ YAMLブループリントを入力データセットに対して実行
   --help.ja                このヘルプメッセージを日本語で表示して終了
   --save-intermediate      中間出力を保存
 
+データ制限オプション:
+  --max-inputs MAX_INPUTS, -n MAX_INPUTS
+                          処理する最大入力データ数（デフォルト: 全件処理）
+
 Hugging Face データセットオプション:
   --dataset DATASET       Hugging Face データセット名
   --subset SUBSET         データセットのサブセット名
@@ -52,6 +56,8 @@ Hugging Face データセットオプション:
   --max-concurrent MAX_CONCURRENT
                           並行処理する最大行数 (デフォルト: 8)
   --no-progress           プログレス表示を無効化
+  --verbose, -v           詳細ログを有効化（デバッグ出力）
+  --legacy-logs           レガシーログ形式を使用（richフォーマット無効化）
 
 適応的並行性制御オプション:
   --adaptive               適応的並行性制御を有効化（レイテンシに応じて動的に調整）
@@ -106,6 +112,9 @@ JSONL出力クリーニングオプション:
   # ストリーミングモード（デフォルト・固定並行数）
   sdg run --yaml config.yaml --input data.jsonl --output result.jsonl --max-concurrent 16
 
+  # 最大500件のみ処理
+  sdg run --yaml config.yaml --input data.jsonl --output result.jsonl --max-inputs 500
+
   # 適応的並行性制御を有効化（並行数が動的に調整される）
   sdg run --yaml config.yaml --input data.jsonl --output result.jsonl \\
     --adaptive --min-batch 1 --max-batch 32 --target-latency-ms 2000
@@ -134,6 +143,8 @@ SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
   --input INPUT         入力データセット (.jsonl または .csv)
   --output OUTPUT       出力JSONLファイル
   --save-intermediate   中間出力を保存
+  --max-inputs MAX_INPUTS, -n MAX_INPUTS
+                        処理する最大入力データ数（デフォルト: 全件処理）
   --dataset DATASET     Hugging Face データセット名
   --subset SUBSET       データセットのサブセット名
   --split SPLIT         データセットの分割 (デフォルト: train)
@@ -141,6 +152,8 @@ SDG (Scalable Data Generator) CLI [レガシーモード: sdg --yaml ...]
   --max-concurrent MAX_CONCURRENT
                         並行処理する最大行数 (デフォルト: 8)
   --no-progress         プログレス表示を無効化
+  --verbose, -v         詳細ログを有効化（デバッグ出力）
+  --legacy-logs         レガシーログ形式を使用（richフォーマット無効化）
   --adaptive            適応的並行性制御を有効化
   --min-batch MIN_BATCH
                         最小並行処理数（適応的制御時、デフォルト: 1）
@@ -190,6 +203,15 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--save-intermediate", action="store_true", help="Save intermediate outputs"
     )
 
+    # Data limit options
+    p.add_argument(
+        "--max-inputs",
+        "-n",
+        type=int,
+        default=None,
+        help="Maximum number of input data to process (default: process all)",
+    )
+
     # Hugging Face Dataset options
     p.add_argument("--dataset", help="Hugging Face dataset name")
     p.add_argument("--subset", help="Dataset subset name")
@@ -204,6 +226,14 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     p.add_argument(
         "--help.ja", action="store_true", help="Show this help message in Japanese"
     )
+    
+    # UI locale option
+    p.add_argument(
+        "--ui-locale",
+        choices=["en", "ja"],
+        default="en",
+        help="UI locale for log output (default: en)",
+    )
 
     # Streaming mode options (default mode)
     p.add_argument(
@@ -216,6 +246,17 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--no-progress",
         action="store_true",
         help="Disable progress display",
+    )
+    p.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose logging (detailed debug output)",
+    )
+    p.add_argument(
+        "--legacy-logs",
+        action="store_true",
+        help="Use legacy log format (disable rich formatting)",
     )
 
     # Adaptive concurrency options
@@ -381,13 +422,30 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 def _execute_run(args):
     """Execute the run command based on args"""
+    # Initialize logger
+    from .logger import init_logger
+    # Get locale from --ui-locale parameter
+    locale = getattr(args, 'ui_locale', 'en')
+    logger = init_logger(
+        verbose=getattr(args, 'verbose', False),
+        quiet=args.no_progress,
+        use_rich=not getattr(args, 'legacy_logs', False),
+        locale=locale,
+    )
+    
     # Validation
     if not args.input and not args.dataset:
-        print("Error: Either --input or --dataset must be provided.", file=sys.stderr)
+        logger.error("Either --input or --dataset must be provided.")
         sys.exit(1)
     if args.input and args.dataset:
-        print("Error: Cannot specify both --input and --dataset.", file=sys.stderr)
+        logger.error("Cannot specify both --input and --dataset.")
         sys.exit(1)
+
+    # Validate max_inputs
+    if args.max_inputs is not None:
+        if args.max_inputs <= 0:
+            logger.error("--max-inputs must be a positive integer.")
+            sys.exit(1)
 
     # Parse mapping
     mapping = {}
@@ -422,6 +480,7 @@ def _execute_run(args):
             min_batch=args.min_batch,
             target_latency_ms=args.target_latency_ms,
             save_intermediate=args.save_intermediate,
+            max_inputs=args.max_inputs,
             dataset_name=args.dataset,
             subset=args.subset,
             split=args.split,
@@ -465,6 +524,8 @@ def _execute_run(args):
                 enable_memory_optimization=args.enable_memory_optimization,
                 max_cache_size=args.max_cache_size,
                 enable_memory_monitoring=args.enable_memory_monitoring,
+                # Data limit options
+                max_inputs=args.max_inputs,
                 # HF Dataset options
                 dataset_name=args.dataset,
                 subset=args.subset,
@@ -497,6 +558,8 @@ def _execute_run(args):
                 enable_memory_optimization=args.enable_memory_optimization,
                 max_cache_size=args.max_cache_size,
                 enable_memory_monitoring=args.enable_memory_monitoring,
+                # Data limit options
+                max_inputs=args.max_inputs,
                 # HF Dataset options
                 dataset_name=args.dataset,
                 subset=args.subset,
@@ -528,6 +591,8 @@ def _execute_run(args):
             enable_memory_monitoring=args.enable_memory_monitoring,
             gc_interval=args.gc_interval,
             memory_threshold_mb=args.memory_threshold_mb,
+            # Data limit options
+            max_inputs=args.max_inputs,
             # HF Dataset options
             dataset_name=args.dataset,
             subset=args.subset,

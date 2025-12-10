@@ -40,6 +40,44 @@ sdg run --yaml examples/sdg_demo.yaml --input examples/data/input.jsonl --output
 sdg run --yaml examples/sdg_demo.yaml --dataset squad --split validation --output output/result.jsonl
 ```
 
+### Logging Options
+
+SDG provides beautiful and readable log output using the `rich` library.
+
+```bash
+# Enable verbose logging (debug output)
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --verbose
+
+# Or use short form
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl -v
+
+# Use Japanese UI (default is English)
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --ui-locale ja
+
+# Use legacy log format (disable rich formatting)
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --legacy-logs
+
+# Disable progress display
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --no-progress
+```
+
+**Logging Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--verbose`, `-v` | Enable verbose logging (show debug messages) |
+| `--ui-locale {en,ja}` | UI locale for log output (default: en) |
+| `--legacy-logs` | Use legacy log format (disable rich formatting) |
+| `--no-progress` | Disable progress display |
+
+**Log Output Features:**
+
+- **Default Mode**: Beautiful formatting with `rich` library, progress bars, and color output (English UI)
+- **Japanese UI** (`--ui-locale ja`): Display log messages in Japanese
+- **Verbose Mode** (`--verbose`): Detailed output including debug messages
+- **Legacy Mode** (`--legacy-logs`): Simple text output (for environments where rich is unavailable)
+- **Quiet Mode** (`--no-progress`): Disable progress display (useful when redirecting to log files)
+
 ### Execution Modes
 
 SDG has two execution modes for streaming data processing:

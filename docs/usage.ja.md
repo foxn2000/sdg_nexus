@@ -40,6 +40,44 @@ sdg run --yaml examples/sdg_demo.yaml --input examples/data/input.jsonl --output
 sdg run --yaml examples/sdg_demo.yaml --dataset squad --split validation --output output/result.jsonl
 ```
 
+### ログ出力オプション
+
+SDGは、`rich`ライブラリを使用した美しく読みやすいログ出力を提供します。
+
+```bash
+# 詳細ログを有効化（デバッグ出力）
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --verbose
+
+# または短縮形
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl -v
+
+# 日本語UIを使用（デフォルトは英語）
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --ui-locale ja
+
+# レガシーログ形式を使用（richフォーマット無効化）
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --legacy-logs
+
+# 進捗表示を無効化
+sdg run --yaml pipeline.yaml --input data.jsonl --output result.jsonl --no-progress
+```
+
+**ログオプション:**
+
+| オプション | 説明 |
+|-----------|------|
+| `--verbose`, `-v` | 詳細ログを有効化（デバッグメッセージを表示） |
+| `--ui-locale {en,ja}` | ログ出力のUI言語（デフォルト: en） |
+| `--legacy-logs` | レガシーログ形式を使用（richフォーマット無効化） |
+| `--no-progress` | 進捗表示を無効化 |
+
+**ログ出力の特徴:**
+
+- **デフォルトモード**: `rich`ライブラリによる美しいフォーマット、プログレスバー、カラー出力（英語UI）
+- **日本語UI** (`--ui-locale ja`): ログメッセージを日本語で表示
+- **Verboseモード** (`--verbose`): デバッグメッセージを含む詳細な出力
+- **レガシーモード** (`--legacy-logs`): シンプルなテキスト出力（richが利用できない環境向け）
+- **Quietモード** (`--no-progress`): 進捗表示を無効化（ログファイルへのリダイレクト時に便利）
+
 ### 実行モード
 
 SDGにはストリーミングデータ処理のための2つの実行モードがあります:

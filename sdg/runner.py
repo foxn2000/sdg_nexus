@@ -18,6 +18,7 @@ from .executors import (
     run_pipeline_streaming_adaptive_batched,
     StreamingResult,
 )
+from .logger import get_logger
 
 # clean_jsonl_line is no longer used in AsyncBufferedWriter.write/write_many
 # since Dict input with json.dumps guarantees valid JSON format
@@ -352,36 +353,59 @@ class AsyncBufferedWriter:
         return len(self._buffer) + len(self._fallback_buffer)
 
 
-def read_jsonl(path: str) -> List[Dict[str, Any]]:
+def read_jsonl(path: str, max_inputs: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     JSONLファイルを読み込む。
 
     Args:
         path: 入力ファイルパス
+        max_inputs: 読み込む最大行数（Noneの場合は全件）
 
     Returns:
         各行をパースした辞書のリスト
     """
     with open(path, "r", encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
+        if max_inputs is None:
+            return [json.loads(line) for line in f if line.strip()]
+        else:
+            result = []
+            for i, line in enumerate(f):
+                if i >= max_inputs:
+                    break
+                if line.strip():
+                    result.append(json.loads(line))
+            return result
 
 
-def read_csv(path: str) -> List[Dict[str, Any]]:
+def read_csv(path: str, max_inputs: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     CSVファイルを読み込む。
 
     Args:
         path: 入力ファイルパス
+        max_inputs: 読み込む最大行数（Noneの場合は全件）
 
     Returns:
         各行を辞書に変換したリスト
     """
     with open(path, "r", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        if max_inputs is None:
+            return list(reader)
+        else:
+            result = []
+            for i, row in enumerate(reader):
+                if i >= max_inputs:
+                    break
+                result.append(row)
+            return result
 
 
 def read_hf_dataset(
-    dataset_name: str, subset: Optional[str] = None, split: str = "train"
+    dataset_name: str,
+    subset: Optional[str] = None,
+    split: str = "train",
+    max_inputs: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Hugging Face Datasetを読み込む。
@@ -390,6 +414,7 @@ def read_hf_dataset(
         dataset_name: データセット名
         subset: サブセット名（オプション）
         split: スプリット名（デフォルト: train）
+        max_inputs: 読み込む最大行数（Noneの場合は全件）
 
     Returns:
         辞書のリスト
@@ -402,14 +427,22 @@ def read_hf_dataset(
             "Please install it with `pip install datasets`."
         )
 
-    print(
-        f"Loading Hugging Face dataset: {dataset_name} (subset={subset}, split={split})...",
-        file=sys.stderr,
+    logger = get_logger()
+    logger.info(
+        f"Loading Hugging Face dataset: {dataset_name} (subset={subset}, split={split})..."
     )
     ds = load_dataset(dataset_name, name=subset, split=split)
 
     # Convert to list of dicts
-    return [item for item in ds]
+    if max_inputs is None:
+        return [item for item in ds]
+    else:
+        result = []
+        for i, item in enumerate(ds):
+            if i >= max_inputs:
+                break
+            result.append(item)
+        return result
 
 
 def apply_mapping(
@@ -496,6 +529,9 @@ async def _run_streaming_async(
     total = len(dataset)
     completed = 0
     errors = 0
+    
+    logger = get_logger()
+    progress = logger.create_progress() if show_progress else None
 
     # AsyncBufferedWriterを使用して非同期で書き込み
     async with AsyncBufferedWriter(
@@ -504,62 +540,85 @@ async def _run_streaming_async(
         flush_interval=flush_interval,
         clean_output=clean_output,
     ) as writer:
-        async for result in run_pipeline_streaming(
-            cfg,
-            dataset,
-            max_concurrent=max_concurrent,
-            save_intermediate=save_intermediate,
-            enable_scheduling=enable_scheduling,
-            max_pending_tasks=max_pending_tasks,
-            chunk_size=chunk_size,
-            enable_memory_optimization=enable_memory_optimization,
-            max_cache_size=max_cache_size,
-            enable_memory_monitoring=enable_memory_monitoring,
-        ):
-            completed += 1
+        if progress:
+            with progress:
+                task = progress.add_task(f"[cyan]Processing {total} rows...", total=total)
+                
+                async for result in run_pipeline_streaming(
+                    cfg,
+                    dataset,
+                    max_concurrent=max_concurrent,
+                    save_intermediate=save_intermediate,
+                    enable_scheduling=enable_scheduling,
+                    max_pending_tasks=max_pending_tasks,
+                    chunk_size=chunk_size,
+                    enable_memory_optimization=enable_memory_optimization,
+                    max_cache_size=max_cache_size,
+                    enable_memory_monitoring=enable_memory_monitoring,
+                ):
+                    completed += 1
 
-            if result.error:
-                errors += 1
-                if show_progress:
-                    print(
-                        f"\r[{completed}/{total}] Error in row {result.row_index}: {result.error}",
-                        file=sys.stderr,
-                    )
-                # エラー時も空の結果を書き込む（行の順序を保持するため後でソートする場合に備え）
-                result_with_error = {
-                    "_row_index": result.row_index,
-                    "_error": str(result.error),
-                    **result.data,
-                }
-                await writer.write(result_with_error)
-            else:
-                # 行インデックスを結果に含める（オプション）
-                result_data = {
-                    "_row_index": result.row_index,
-                    **result.data,
-                }
-                await writer.write(result_data)
-
-                if show_progress:
-                    print(
-                        f"\r[{completed}/{total}] Completed row {result.row_index}",
-                        end="",
-                        file=sys.stderr,
-                    )
-
-    if show_progress:
-        print(file=sys.stderr)  # 最後に改行
-        if writer.total_cleaned > 0:
-            print(
-                f"[JSONL Cleaner] Cleaned {writer.total_cleaned} invalid JSON lines.",
-                file=sys.stderr,
-            )
-        if errors > 0:
-            print(
-                f"Completed with {errors} errors out of {total} rows.", file=sys.stderr
-            )
+                    if result.error:
+                        errors += 1
+                        logger.debug(f"Error in row {result.row_index}: {result.error}")
+                        # エラー時も空の結果を書き込む（行の順序を保持するため後でソートする場合に備え）
+                        result_with_error = {
+                            "_row_index": result.row_index,
+                            "_error": str(result.error),
+                            **result.data,
+                        }
+                        await writer.write(result_with_error)
+                    else:
+                        # 行インデックスを結果に含める（オプション）
+                        result_data = {
+                            "_row_index": result.row_index,
+                            **result.data,
+                        }
+                        await writer.write(result_data)
+                    
+                    progress.update(task, advance=1)
         else:
-            print(f"Successfully processed all {total} rows.", file=sys.stderr)
+            # プログレス表示なしの場合
+            async for result in run_pipeline_streaming(
+                cfg,
+                dataset,
+                max_concurrent=max_concurrent,
+                save_intermediate=save_intermediate,
+                enable_scheduling=enable_scheduling,
+                max_pending_tasks=max_pending_tasks,
+                chunk_size=chunk_size,
+                enable_memory_optimization=enable_memory_optimization,
+                max_cache_size=max_cache_size,
+                enable_memory_monitoring=enable_memory_monitoring,
+            ):
+                completed += 1
+
+                if result.error:
+                    errors += 1
+                    result_with_error = {
+                        "_row_index": result.row_index,
+                        "_error": str(result.error),
+                        **result.data,
+                    }
+                    await writer.write(result_with_error)
+                else:
+                    result_data = {
+                        "_row_index": result.row_index,
+                        **result.data,
+                    }
+                    await writer.write(result_data)
+
+    logger = get_logger()
+    if show_progress:
+        if writer.total_cleaned > 0:
+            logger.info(f"Cleaned {writer.total_cleaned} invalid JSON lines")
+        
+        stats = {
+            "total": total,
+            "completed": completed,
+            "errors": errors,
+        }
+        logger.print_stats(stats)
 
     return completed, errors
 
@@ -614,6 +673,9 @@ async def _run_streaming_adaptive_async(
     total = len(dataset)
     completed = 0
     errors = 0
+    
+    logger = get_logger()
+    progress = logger.create_progress() if show_progress else None
 
     # AsyncBufferedWriterを使用して非同期で書き込み
     async with AsyncBufferedWriter(
@@ -622,65 +684,92 @@ async def _run_streaming_adaptive_async(
         flush_interval=flush_interval,
         clean_output=clean_output,
     ) as writer:
-        async for result in run_pipeline_streaming_adaptive(
-            cfg,
-            dataset,
-            max_concurrent=max_concurrent,
-            min_concurrent=min_concurrent,
-            target_latency_ms=target_latency_ms,
-            target_queue_depth=target_queue_depth,
-            metrics_type=metrics_type,
-            save_intermediate=save_intermediate,
-            enable_scheduling=enable_scheduling,
-            max_pending_tasks=max_pending_tasks,
-            chunk_size=chunk_size,
-            enable_memory_optimization=enable_memory_optimization,
-            max_cache_size=max_cache_size,
-            enable_memory_monitoring=enable_memory_monitoring,
-        ):
-            completed += 1
+        if progress:
+            with progress:
+                task = progress.add_task(f"[cyan]Processing {total} rows (adaptive)...", total=total)
+                
+                async for result in run_pipeline_streaming_adaptive(
+                    cfg,
+                    dataset,
+                    max_concurrent=max_concurrent,
+                    min_concurrent=min_concurrent,
+                    target_latency_ms=target_latency_ms,
+                    target_queue_depth=target_queue_depth,
+                    metrics_type=metrics_type,
+                    save_intermediate=save_intermediate,
+                    enable_scheduling=enable_scheduling,
+                    max_pending_tasks=max_pending_tasks,
+                    chunk_size=chunk_size,
+                    enable_memory_optimization=enable_memory_optimization,
+                    max_cache_size=max_cache_size,
+                    enable_memory_monitoring=enable_memory_monitoring,
+                ):
+                    completed += 1
 
-            if result.error:
-                errors += 1
-                if show_progress:
-                    print(
-                        f"\r[{completed}/{total}] Error in row {result.row_index}: {result.error}",
-                        file=sys.stderr,
-                    )
-                # エラー時も空の結果を書き込む
-                result_with_error = {
-                    "_row_index": result.row_index,
-                    "_error": str(result.error),
-                    **result.data,
-                }
-                await writer.write(result_with_error)
-            else:
-                result_data = {
-                    "_row_index": result.row_index,
-                    **result.data,
-                }
-                await writer.write(result_data)
-
-                if show_progress:
-                    print(
-                        f"\r[{completed}/{total}] Completed row {result.row_index}",
-                        end="",
-                        file=sys.stderr,
-                    )
-
-    if show_progress:
-        print(file=sys.stderr)  # 最後に改行
-        if writer.total_cleaned > 0:
-            print(
-                f"[JSONL Cleaner] Cleaned {writer.total_cleaned} invalid JSON lines.",
-                file=sys.stderr,
-            )
-        if errors > 0:
-            print(
-                f"Completed with {errors} errors out of {total} rows.", file=sys.stderr
-            )
+                    if result.error:
+                        errors += 1
+                        logger.debug(f"Error in row {result.row_index}: {result.error}")
+                        # エラー時も空の結果を書き込む
+                        result_with_error = {
+                            "_row_index": result.row_index,
+                            "_error": str(result.error),
+                            **result.data,
+                        }
+                        await writer.write(result_with_error)
+                    else:
+                        result_data = {
+                            "_row_index": result.row_index,
+                            **result.data,
+                        }
+                        await writer.write(result_data)
+                    
+                    progress.update(task, advance=1)
         else:
-            print(f"Successfully processed all {total} rows.", file=sys.stderr)
+            # プログレス表示なしの場合
+            async for result in run_pipeline_streaming_adaptive(
+                cfg,
+                dataset,
+                max_concurrent=max_concurrent,
+                min_concurrent=min_concurrent,
+                target_latency_ms=target_latency_ms,
+                target_queue_depth=target_queue_depth,
+                metrics_type=metrics_type,
+                save_intermediate=save_intermediate,
+                enable_scheduling=enable_scheduling,
+                max_pending_tasks=max_pending_tasks,
+                chunk_size=chunk_size,
+                enable_memory_optimization=enable_memory_optimization,
+                max_cache_size=max_cache_size,
+                enable_memory_monitoring=enable_memory_monitoring,
+            ):
+                completed += 1
+
+                if result.error:
+                    errors += 1
+                    result_with_error = {
+                        "_row_index": result.row_index,
+                        "_error": str(result.error),
+                        **result.data,
+                    }
+                    await writer.write(result_with_error)
+                else:
+                    result_data = {
+                        "_row_index": result.row_index,
+                        **result.data,
+                    }
+                    await writer.write(result_data)
+
+    logger = get_logger()
+    if show_progress:
+        if writer.total_cleaned > 0:
+            logger.info(f"Cleaned {writer.total_cleaned} invalid JSON lines")
+        
+        stats = {
+            "total": total,
+            "completed": completed,
+            "errors": errors,
+        }
+        logger.print_stats(stats)
 
     return completed, errors
 
@@ -739,6 +828,9 @@ async def _run_streaming_adaptive_batched_async(
     total = len(dataset)
     completed = 0
     errors = 0
+    
+    logger = get_logger()
+    progress = logger.create_progress() if show_progress else None
 
     # AsyncBufferedWriterを使用して非同期で書き込み
     async with AsyncBufferedWriter(
@@ -747,66 +839,95 @@ async def _run_streaming_adaptive_batched_async(
         flush_interval=flush_interval,
         clean_output=clean_output,
     ) as writer:
-        async for result in run_pipeline_streaming_adaptive_batched(
-            cfg,
-            dataset,
-            max_concurrent=max_concurrent,
-            min_concurrent=min_concurrent,
-            target_latency_ms=target_latency_ms,
-            target_queue_depth=target_queue_depth,
-            metrics_type=metrics_type,
-            max_batch_size=max_batch_size,
-            max_wait_ms=max_wait_ms,
-            save_intermediate=save_intermediate,
-            enable_scheduling=enable_scheduling,
-            max_pending_tasks=max_pending_tasks,
-            chunk_size=chunk_size,
-            enable_memory_optimization=enable_memory_optimization,
-            max_cache_size=max_cache_size,
-            enable_memory_monitoring=enable_memory_monitoring,
-        ):
-            completed += 1
+        if progress:
+            with progress:
+                task = progress.add_task(f"[cyan]Processing {total} rows (batched)...", total=total)
+                
+                async for result in run_pipeline_streaming_adaptive_batched(
+                    cfg,
+                    dataset,
+                    max_concurrent=max_concurrent,
+                    min_concurrent=min_concurrent,
+                    target_latency_ms=target_latency_ms,
+                    target_queue_depth=target_queue_depth,
+                    metrics_type=metrics_type,
+                    max_batch_size=max_batch_size,
+                    max_wait_ms=max_wait_ms,
+                    save_intermediate=save_intermediate,
+                    enable_scheduling=enable_scheduling,
+                    max_pending_tasks=max_pending_tasks,
+                    chunk_size=chunk_size,
+                    enable_memory_optimization=enable_memory_optimization,
+                    max_cache_size=max_cache_size,
+                    enable_memory_monitoring=enable_memory_monitoring,
+                ):
+                    completed += 1
 
-            if result.error:
-                errors += 1
-                if show_progress:
-                    print(
-                        f"\r[{completed}/{total}] Error in row {result.row_index}: {result.error}",
-                        file=sys.stderr,
-                    )
-                result_with_error = {
-                    "_row_index": result.row_index,
-                    "_error": str(result.error),
-                    **result.data,
-                }
-                await writer.write(result_with_error)
-            else:
-                result_data = {
-                    "_row_index": result.row_index,
-                    **result.data,
-                }
-                await writer.write(result_data)
-
-                if show_progress:
-                    print(
-                        f"\r[{completed}/{total}] Completed row {result.row_index}",
-                        end="",
-                        file=sys.stderr,
-                    )
-
-    if show_progress:
-        print(file=sys.stderr)
-        if writer.total_cleaned > 0:
-            print(
-                f"[JSONL Cleaner] Cleaned {writer.total_cleaned} invalid JSON lines.",
-                file=sys.stderr,
-            )
-        if errors > 0:
-            print(
-                f"Completed with {errors} errors out of {total} rows.", file=sys.stderr
-            )
+                    if result.error:
+                        errors += 1
+                        logger.debug(f"Error in row {result.row_index}: {result.error}")
+                        result_with_error = {
+                            "_row_index": result.row_index,
+                            "_error": str(result.error),
+                            **result.data,
+                        }
+                        await writer.write(result_with_error)
+                    else:
+                        result_data = {
+                            "_row_index": result.row_index,
+                            **result.data,
+                        }
+                        await writer.write(result_data)
+                    
+                    progress.update(task, advance=1)
         else:
-            print(f"Successfully processed all {total} rows.", file=sys.stderr)
+            # プログレス表示なしの場合
+            async for result in run_pipeline_streaming_adaptive_batched(
+                cfg,
+                dataset,
+                max_concurrent=max_concurrent,
+                min_concurrent=min_concurrent,
+                target_latency_ms=target_latency_ms,
+                target_queue_depth=target_queue_depth,
+                metrics_type=metrics_type,
+                max_batch_size=max_batch_size,
+                max_wait_ms=max_wait_ms,
+                save_intermediate=save_intermediate,
+                enable_scheduling=enable_scheduling,
+                max_pending_tasks=max_pending_tasks,
+                chunk_size=chunk_size,
+                enable_memory_optimization=enable_memory_optimization,
+                max_cache_size=max_cache_size,
+                enable_memory_monitoring=enable_memory_monitoring,
+            ):
+                completed += 1
+
+                if result.error:
+                    errors += 1
+                    result_with_error = {
+                        "_row_index": result.row_index,
+                        "_error": str(result.error),
+                        **result.data,
+                    }
+                    await writer.write(result_with_error)
+                else:
+                    result_data = {
+                        "_row_index": result.row_index,
+                        **result.data,
+                    }
+                    await writer.write(result_data)
+
+    logger = get_logger()
+    if show_progress:
+        if writer.total_cleaned > 0:
+            logger.info(f"Cleaned {writer.total_cleaned} invalid JSON lines")
+        
+        stats = {
+            "total": total,
+            "completed": completed,
+            "errors": errors,
+        }
+        logger.print_stats(stats)
 
     return completed, errors
 
@@ -838,6 +959,8 @@ def run_streaming_adaptive_batched(
     enable_memory_optimization: bool = False,
     max_cache_size: int = 500,
     enable_memory_monitoring: bool = False,
+    # Data limit options
+    max_inputs: Optional[int] = None,
     # HF Dataset options
     dataset_name: Optional[str] = None,
     subset: Optional[str] = None,
@@ -894,19 +1017,48 @@ def run_streaming_adaptive_batched(
     # load data
     if input_path:
         if input_path.endswith(".jsonl"):
-            ds = read_jsonl(input_path)
+            ds = read_jsonl(input_path, max_inputs=max_inputs)
         elif input_path.endswith(".csv"):
-            ds = read_csv(input_path)
+            ds = read_csv(input_path, max_inputs=max_inputs)
         else:
             raise ValueError("Unsupported input format. Use .jsonl or .csv")
     elif dataset_name:
-        ds = read_hf_dataset(dataset_name, subset, split)
+        ds = read_hf_dataset(dataset_name, subset, split, max_inputs=max_inputs)
     else:
         raise ValueError("Either input_path or dataset_name must be provided")
 
     # Apply mapping
     if mapping:
         ds = apply_mapping(ds, mapping)
+
+    # Print dataset info
+    logger = get_logger()
+    if show_progress:
+        subtitle = "Adaptive concurrency control with request batching" if logger.locale == "en" else "リクエストバッチング付き適応的並行性制御"
+        logger.header("SDG Pipeline - Adaptive Batched Mode", subtitle)
+        
+        if logger.locale == "ja":
+            config_info = {
+                "入力データ数": f"{len(ds)}" + (f" (--max-inputs {max_inputs}で制限)" if max_inputs else ""),
+                "最大並行数": max_concurrent,
+                "最小並行数": min_concurrent,
+                "目標レイテンシ": f"{target_latency_ms}ms",
+                "メトリクスタイプ": metrics_type,
+                "最大バッチサイズ": max_batch_size,
+                "最大待機時間": f"{max_wait_ms}ms",
+            }
+            logger.table("実行設定", config_info)
+        else:
+            config_info = {
+                "Input Data Count": f"{len(ds)}" + (f" (limited by --max-inputs {max_inputs})" if max_inputs else ""),
+                "Max Concurrency": max_concurrent,
+                "Min Concurrency": min_concurrent,
+                "Target Latency": f"{target_latency_ms}ms",
+                "Metrics Type": metrics_type,
+                "Max Batch Size": max_batch_size,
+                "Max Wait Time": f"{max_wait_ms}ms",
+            }
+            logger.table("Execution Configuration", config_info)
 
     # run
     asyncio.run(
@@ -959,6 +1111,8 @@ def run_streaming_adaptive(
     enable_memory_optimization: bool = False,
     max_cache_size: int = 500,
     enable_memory_monitoring: bool = False,
+    # Data limit options
+    max_inputs: Optional[int] = None,
     # HF Dataset options
     dataset_name: Optional[str] = None,
     subset: Optional[str] = None,
@@ -1013,19 +1167,44 @@ def run_streaming_adaptive(
     # load data
     if input_path:
         if input_path.endswith(".jsonl"):
-            ds = read_jsonl(input_path)
+            ds = read_jsonl(input_path, max_inputs=max_inputs)
         elif input_path.endswith(".csv"):
-            ds = read_csv(input_path)
+            ds = read_csv(input_path, max_inputs=max_inputs)
         else:
             raise ValueError("Unsupported input format. Use .jsonl or .csv")
     elif dataset_name:
-        ds = read_hf_dataset(dataset_name, subset, split)
+        ds = read_hf_dataset(dataset_name, subset, split, max_inputs=max_inputs)
     else:
         raise ValueError("Either input_path or dataset_name must be provided")
 
     # Apply mapping
     if mapping:
         ds = apply_mapping(ds, mapping)
+
+    # Print dataset info
+    logger = get_logger()
+    if show_progress:
+        subtitle = "Adaptive concurrency control" if logger.locale == "en" else "適応的並行性制御"
+        logger.header("SDG Pipeline - Adaptive Mode", subtitle)
+        
+        if logger.locale == "ja":
+            config_info = {
+                "入力データ数": f"{len(ds)}" + (f" (--max-inputs {max_inputs}で制限)" if max_inputs else ""),
+                "最大並行数": max_concurrent,
+                "最小並行数": min_concurrent,
+                "目標レイテンシ": f"{target_latency_ms}ms",
+                "メトリクスタイプ": metrics_type,
+            }
+            logger.table("実行設定", config_info)
+        else:
+            config_info = {
+                "Input Data Count": f"{len(ds)}" + (f" (limited by --max-inputs {max_inputs})" if max_inputs else ""),
+                "Max Concurrency": max_concurrent,
+                "Min Concurrency": min_concurrent,
+                "Target Latency": f"{target_latency_ms}ms",
+                "Metrics Type": metrics_type,
+            }
+            logger.table("Execution Configuration", config_info)
 
     # run
     asyncio.run(
@@ -1074,6 +1253,8 @@ def run_streaming(
     enable_memory_monitoring: bool = False,
     gc_interval: int = 100,
     memory_threshold_mb: int = 1024,
+    # Data limit options
+    max_inputs: Optional[int] = None,
     # HF Dataset options
     dataset_name: Optional[str] = None,
     subset: Optional[str] = None,
@@ -1126,19 +1307,38 @@ def run_streaming(
     # load data
     if input_path:
         if input_path.endswith(".jsonl"):
-            ds = read_jsonl(input_path)
+            ds = read_jsonl(input_path, max_inputs=max_inputs)
         elif input_path.endswith(".csv"):
-            ds = read_csv(input_path)
+            ds = read_csv(input_path, max_inputs=max_inputs)
         else:
             raise ValueError("Unsupported input format. Use .jsonl or .csv")
     elif dataset_name:
-        ds = read_hf_dataset(dataset_name, subset, split)
+        ds = read_hf_dataset(dataset_name, subset, split, max_inputs=max_inputs)
     else:
         raise ValueError("Either input_path or dataset_name must be provided")
 
     # Apply mapping
     if mapping:
         ds = apply_mapping(ds, mapping)
+
+    # Print dataset info
+    logger = get_logger()
+    if show_progress:
+        subtitle = "Fixed concurrency streaming processing" if logger.locale == "en" else "固定並行数ストリーミング処理"
+        logger.header("SDG Pipeline - Streaming Mode", subtitle)
+        
+        if logger.locale == "ja":
+            config_info = {
+                "入力データ数": f"{len(ds)}" + (f" (--max-inputs {max_inputs}で制限)" if max_inputs else ""),
+                "並行処理数": max_concurrent,
+            }
+            logger.table("実行設定", config_info)
+        else:
+            config_info = {
+                "Input Data Count": f"{len(ds)}" + (f" (limited by --max-inputs {max_inputs})" if max_inputs else ""),
+                "Concurrency": max_concurrent,
+            }
+            logger.table("Execution Configuration", config_info)
 
     # run
     asyncio.run(
@@ -1168,6 +1368,8 @@ def run(
     min_batch: int,
     target_latency_ms: int,
     save_intermediate: bool,
+    # Data limit options
+    max_inputs: Optional[int] = None,
     # HF Dataset options
     dataset_name: Optional[str] = None,
     subset: Optional[str] = None,
@@ -1181,19 +1383,41 @@ def run(
     # load data
     if input_path:
         if input_path.endswith(".jsonl"):
-            ds = read_jsonl(input_path)
+            ds = read_jsonl(input_path, max_inputs=max_inputs)
         elif input_path.endswith(".csv"):
-            ds = read_csv(input_path)
+            ds = read_csv(input_path, max_inputs=max_inputs)
         else:
             raise ValueError("Unsupported input format. Use .jsonl or .csv")
     elif dataset_name:
-        ds = read_hf_dataset(dataset_name, subset, split)
+        ds = read_hf_dataset(dataset_name, subset, split, max_inputs=max_inputs)
     else:
         raise ValueError("Either input_path or dataset_name must be provided")
 
     # Apply mapping
     if mapping:
         ds = apply_mapping(ds, mapping)
+
+    # Print dataset info
+    logger = get_logger()
+    subtitle = "Legacy batch processing mode" if logger.locale == "en" else "レガシーバッチ処理モード"
+    logger.header("SDG Pipeline - Legacy Batch Mode", subtitle)
+    
+    if logger.locale == "ja":
+        config_info = {
+            "入力データ数": f"{len(ds)}" + (f" (--max-inputs {max_inputs}で制限)" if max_inputs else ""),
+            "最大バッチ": max_batch,
+            "最小バッチ": min_batch,
+            "目標レイテンシ": f"{target_latency_ms}ms",
+        }
+        logger.table("実行設定", config_info)
+    else:
+        config_info = {
+            "Input Data Count": f"{len(ds)}" + (f" (limited by --max-inputs {max_inputs})" if max_inputs else ""),
+            "Max Batch": max_batch,
+            "Min Batch": min_batch,
+            "Target Latency": f"{target_latency_ms}ms",
+        }
+        logger.table("Execution Configuration", config_info)
 
     # run
     res = asyncio.run(

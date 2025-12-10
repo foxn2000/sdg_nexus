@@ -159,6 +159,26 @@ sdg run \
   --output output/result.jsonl
 ```
 
+With verbose logging (detailed debug output):
+
+```bash
+sdg run \
+  --yaml examples/sdg_demo_v2.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --verbose
+```
+
+With Japanese UI (default is English):
+
+```bash
+sdg run \
+  --yaml examples/sdg_demo_v2.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --ui-locale ja
+```
+
 Execution with custom batch settings:
 
 ```bash

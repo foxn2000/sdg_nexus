@@ -164,6 +164,36 @@ sdg run \
   --output output/result.jsonl
 ```
 
+詳細ログを有効化して実行:
+
+```bash
+sdg run \
+  --yaml examples/sdg_demo_v2.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --verbose
+```
+
+日本語UIで実行（デフォルトは英語）:
+
+```bash
+sdg run \
+  --yaml examples/sdg_demo_v2.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --ui-locale ja
+```
+
+レガシーログ形式で実行（richフォーマット無効化）:
+
+```bash
+sdg run \
+  --yaml examples/sdg_demo_v2.yaml \
+  --input data.jsonl \
+  --output result.jsonl \
+  --legacy-logs
+```
+
 カスタムバッチ設定による実行:
 
 ```bash
