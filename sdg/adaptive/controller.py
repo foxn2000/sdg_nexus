@@ -338,26 +338,26 @@ class AdaptiveController:
         max_concurrency: int = 64,
         target_latency_ms: float = 2000.0,
         target_queue_depth: int = 32,
-        # AIMD parameters
-        increase_step: int = 2,  # Additive increase per adjustment (CA phase)
-        decrease_factor: float = 0.5,  # Multiplicative decrease factor (for errors)
-        # Adjustment sensitivity - more tolerant to avoid premature decrease
-        latency_tolerance: float = 2.0,  # Trigger decrease if latency > target * tolerance (was 1.5)
-        error_rate_threshold: float = 0.1,  # 10% error rate triggers decrease (was 0.05)
+        # AIMD parameters - 非常にアグレッシブな設定
+        increase_step: int = 5,  # Additive increase per adjustment (CA phase) - 非常に積極的に増加
+        decrease_factor: float = 0.5,  # Multiplicative decrease factor (for errors) - 元の値に戻す
+        # Adjustment sensitivity - 非常に寛容に設定
+        latency_tolerance: float = 5.0,  # Trigger decrease if latency > target * tolerance - 非常に寛容に
+        error_rate_threshold: float = 0.1,  # 10% error rate triggers decrease - 元の値に戻す
         # Timing
-        adjustment_interval_ms: int = 1000,  # Minimum time between adjustments
-        window_size: int = 50,  # Number of samples for averaging
+        adjustment_interval_ms: int = 500,  # Minimum time between adjustments - より頻繁に調整
+        window_size: int = 30,  # Number of samples for averaging - より少ないサンプルで反応
         # Initial concurrency
         initial_concurrency: Optional[int] = None,
         # Use legacy semaphore for backward compatibility
         use_dynamic_semaphore: bool = True,
         # Advanced parameters
-        ema_alpha: float = 0.2,  # EMA smoothing factor - lower for more stability (was 0.3)
+        ema_alpha: float = 0.35,  # EMA smoothing factor - 非常に反応的に
         slow_start_threshold: Optional[int] = None,  # Initial ssthresh
-        vegas_alpha: float = 3.0,  # Vegas lower threshold - more tolerant (was 2.0)
-        vegas_beta: float = 6.0,  # Vegas upper threshold - more tolerant (was 4.0)
-        mild_decrease_factor: float = 0.92,  # Decrease factor for latency spikes - gentler (was 0.85)
-        trend_sensitivity: float = 0.15,  # Threshold for trend detection - less sensitive (was 0.1)
+        vegas_alpha: float = 8.0,  # Vegas lower threshold - 非常に寛容に
+        vegas_beta: float = 15.0,  # Vegas upper threshold - 非常に寛容に
+        mild_decrease_factor: float = 0.98,  # Decrease factor for latency spikes - ほぼ減少させない
+        trend_sensitivity: float = 0.3,  # Threshold for trend detection - 非常に寛容に
     ):
         """
         Initialize the adaptive controller.
@@ -409,9 +409,9 @@ class AdaptiveController:
                 min_concurrency, min(initial_concurrency, max_concurrency)
             )
         else:
-            # Start from a reasonable middle point instead of min_concurrency
-            # This prevents the concurrency from being too low at the start
-            self._current: int = max(min_concurrency, max_concurrency // 4)
+            # Start from a very high point for maximum initial throughput
+            # Use max(min_concurrency, max_concurrency * 3 // 4) for aggressive start
+            self._current: int = max(min_concurrency, max_concurrency * 3 // 4)
 
         # Error tracking for immediate response
         self._recent_errors: int = 0
@@ -420,11 +420,11 @@ class AdaptiveController:
         self._consecutive_errors: int = 0
         self._last_error_time: float = 0.0
 
-        # Slow start threshold (ssthresh) - initially set high or to given value
+        # Slow start threshold (ssthresh) - initially set very high
         if slow_start_threshold is not None:
             self._ssthresh: int = slow_start_threshold
         else:
-            self._ssthresh: int = max_concurrency // 2
+            self._ssthresh: int = max_concurrency * 3 // 4
 
         # Control phase
         self._phase: ControlPhase = ControlPhase.SLOW_START
@@ -628,19 +628,19 @@ class AdaptiveController:
         old_concurrency = self._current
 
         if self._consecutive_errors >= 5:
-            # Multiple consecutive errors: aggressive reduction (was 3)
+            # Multiple consecutive errors: aggressive reduction - 元の値に戻す
             new_concurrency = max(
                 self.min_concurrency, int(self._current * self.decrease_factor)
             )
             action = "immediate_md_consecutive_errors"
         elif self._recent_errors >= 3:
-            # Multiple errors in window: moderate reduction (was 2)
+            # Multiple errors in window: moderate reduction - 元の値に戻す
             new_concurrency = max(
                 self.min_concurrency, int(self._current * self.mild_decrease_factor)
             )
             action = "immediate_md_multiple_errors"
         else:
-            # Single error: very mild reduction - just reduce by 1
+            # Single error: very mild reduction - just reduce by 1 - 元の値に戻す
             new_concurrency = max(
                 self.min_concurrency, self._current - 1
             )
@@ -746,19 +746,17 @@ class AdaptiveController:
         """
         signals: List[Tuple[str, float]] = []
 
-        # Signal 1: EMA latency vs target
+        # Signal 1: EMA latency vs target - 非常に寛容な閾値
         if self._ema_latency.initialized:
             latency_ratio = self._ema_latency.value / self.target_latency
-            if latency_ratio < 0.7:
+            if latency_ratio < 2.5:
                 signals.append(("none", 0.0))
-            elif latency_ratio < 1.0:
-                signals.append(("none", latency_ratio - 0.7))
-            elif latency_ratio < 1.3:
-                signals.append(("mild", (latency_ratio - 1.0) / 0.3))
+            elif latency_ratio < 3.5:
+                signals.append(("mild", (latency_ratio - 2.5) / 1.0))
             elif latency_ratio < self.latency_tolerance:
-                signals.append(("moderate", (latency_ratio - 1.3) / 0.2))
+                signals.append(("moderate", (latency_ratio - 3.5) / 1.5))
             else:
-                signals.append(("severe", min(1.0, (latency_ratio - 1.5) / 0.5)))
+                signals.append(("severe", min(1.0, (latency_ratio - 5.0) / 3.0)))
 
         # Signal 2: Vegas-style congestion
         vegas_signal = self._congestion.congestion_signal
@@ -884,18 +882,18 @@ class AdaptiveController:
             action = "decrease_moderate"
 
         elif congestion_level == "mild":
-            # Hold for mild congestion - don't decrease too quickly
+            # Hold for mild congestion - don't decrease, just hold
             self._consecutive_good = 0
             self._consecutive_bad += 1
 
-            if self._consecutive_bad >= 5:
-                # Sustained mild congestion - very slight decrease (was 3)
+            if self._consecutive_bad >= 20:
+                # Sustained mild congestion - very slight decrease (非常に寛容に)
                 new_concurrency = max(
-                    self.min_concurrency, self._current - 1  # Reduce by 1 instead of increase_step
+                    self.min_concurrency, self._current - 1
                 )
                 action = "decrease_mild"
             else:
-                # Transient - just hold
+                # Transient or acceptable - just hold
                 new_concurrency = self._current
                 action = "hold_mild"
 
@@ -905,15 +903,15 @@ class AdaptiveController:
             self._consecutive_good += 1
 
             if self._phase == ControlPhase.SLOW_START:
-                # Exponential increase in slow start - more aggressive
+                # Exponential increase in slow start - 非常に積極的に
                 if (
                     self._current < self._ssthresh
-                    and self._consecutive_good >= 1  # Reduced from 2
+                    and self._consecutive_good >= 1
                     and self._ema_latency.initialized
-                    and self._ema_latency.value < self.target_latency * 0.9  # Relaxed from 0.7
+                    and self._ema_latency.value < self.target_latency * 2.5  # 非常に寛容に
                 ):
-                    # Double the concurrency (exponential)
-                    new_concurrency = min(self.max_concurrency, self._current * 2)
+                    # Triple the concurrency (very aggressive exponential)
+                    new_concurrency = min(self.max_concurrency, self._current * 3)
                     action = "ss_increase"
 
                     # Exit slow start if we hit ssthresh
@@ -921,9 +919,9 @@ class AdaptiveController:
                         self._phase = ControlPhase.CONGESTION_AVOIDANCE
                         action = "ss_to_ca"
                 elif self._consecutive_good >= 1:
-                    # More aggressive linear increase in slow start
+                    # Very aggressive linear increase in slow start
                     new_concurrency = min(
-                        self.max_concurrency, self._current + self.increase_step * 2
+                        self.max_concurrency, self._current + self.increase_step * 5
                     )
                     action = "ss_linear"
                 else:
@@ -931,10 +929,10 @@ class AdaptiveController:
                     new_concurrency = self._current
                     action = "ss_hold"
             else:
-                # Congestion avoidance - linear increase
-                if self._consecutive_good >= 1:  # Reduced from 2
+                # Congestion avoidance - aggressive linear increase
+                if self._consecutive_good >= 1:
                     new_concurrency = min(
-                        self.max_concurrency, self._current + self.increase_step
+                        self.max_concurrency, self._current + self.increase_step * 2
                     )
                     action = "ca_increase"
                 else:
@@ -1041,9 +1039,9 @@ class AdaptiveController:
 
     def reset(self) -> None:
         """Reset controller to initial state."""
-        # Reset to slow start with minimum concurrency
-        self._current = self.min_concurrency
-        self._ssthresh = self.max_concurrency // 2
+        # Reset to slow start with a very aggressive starting point
+        self._current = max(self.min_concurrency, self.max_concurrency * 3 // 4)
+        self._ssthresh = self.max_concurrency * 3 // 4
         self._phase = ControlPhase.SLOW_START
 
         self._latency_window.clear()

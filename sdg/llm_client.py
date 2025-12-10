@@ -34,10 +34,10 @@ class SharedHttpTransport:
     DEFAULT_MAX_CONNECTIONS: ClassVar[int] = 100
     DEFAULT_MAX_KEEPALIVE_CONNECTIONS: ClassVar[int] = 50
     DEFAULT_KEEPALIVE_EXPIRY: ClassVar[float] = 30.0
-    DEFAULT_CONNECT_TIMEOUT: ClassVar[float] = 10.0
-    DEFAULT_READ_TIMEOUT: ClassVar[float] = 60.0
-    DEFAULT_WRITE_TIMEOUT: ClassVar[float] = 30.0
-    DEFAULT_POOL_TIMEOUT: ClassVar[float] = 10.0
+    DEFAULT_CONNECT_TIMEOUT: ClassVar[float] = 60.0
+    DEFAULT_READ_TIMEOUT: ClassVar[float] = 3600.0  # 1 hour to avoid timeouts
+    DEFAULT_WRITE_TIMEOUT: ClassVar[float] = 600.0
+    DEFAULT_POOL_TIMEOUT: ClassVar[float] = 60.0
 
     _instance: ClassVar[Optional["SharedHttpTransport"]] = None
     _lock: ClassVar[asyncio.Lock] = asyncio.Lock()
@@ -359,7 +359,8 @@ class LLMClient:
             custom_headers.pop(h, None)
         self.extra_headers = custom_headers
 
-        self.timeout = timeout_sec or 60.0
+        # デフォルトタイムアウトを大幅に延長 (指定がない場合は1時間)
+        self.timeout = timeout_sec if timeout_sec is not None else 3600.0
 
         # 共有トランスポートの初期化または取得
         if use_shared_transport:
@@ -429,9 +430,10 @@ class LLMClient:
         retry_cfg: Dict[str, Any] | None = None,
     ) -> Tuple[Optional[str], Optional[Exception], int]:
         t0 = now_ms()
-        attempts = int((retry_cfg or {}).get("max_attempts", 1))
+        # デフォルトのリトライ回数を増やしてタイムアウトエラーへの耐性を高める
+        attempts = int((retry_cfg or {}).get("max_attempts", 10))
         backoff = (retry_cfg or {}).get("backoff", {})
-        initial_delay_ms = int(backoff.get("initial_ms", 250))
+        initial_delay_ms = int(backoff.get("initial_ms", 1000))  # 初期待機時間も少し増やす
         factor = float(backoff.get("factor", 2.0))
         # 空返答リトライ機能（デフォルト: 有効）
         retry_on_empty = (retry_cfg or {}).get("retry_on_empty", True)
