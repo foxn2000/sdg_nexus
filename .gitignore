@@ -143,6 +143,9 @@ pnpm-debug.log*
 out/
 coverage/
 
+# memo files
+memo.md
+
 # Caches
 .cache/
 .out/
