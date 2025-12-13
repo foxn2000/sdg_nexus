@@ -6,11 +6,12 @@ from .runner import (
     run_streaming,
     run_streaming_adaptive,
     run_streaming_adaptive_batched,
+    test_run,
 )
 
 
 # 日本語ヘルプメッセージ
-HELP_JA = """使い方: sdg [--help.ja] {run} ...
+HELP_JA = """使い方: sdg [--help.ja] {run,test-run} ...
 
 SDG (Scalable Data Generator) CLI
 
@@ -19,10 +20,12 @@ SDG (Scalable Data Generator) CLI
   --help.ja       このヘルプメッセージを日本語で表示して終了
 
 サブコマンド:
-  {run}
+  {run,test-run}
     run           YAMLブループリントを入力データセットに対して実行
+    test-run      YAMLブループリントを1件のデータに対してテスト実行
 
 'sdg run --help.ja' でサブコマンドの詳細なヘルプを表示できます。
+'sdg test-run --help.ja' でtest-runコマンドの詳細なヘルプを表示できます。
 
 レガシーモード（後方互換性のため）:
   sdg --yaml <file> --input <file> --output <file> [オプション]
@@ -129,6 +132,49 @@ JSONL出力クリーニングオプション:
 
   # 中間出力を保存
   sdg run --yaml config.yaml --input data.jsonl --output result.jsonl --save-intermediate
+"""
+
+# test-run command help message in Japanese
+TEST_RUN_HELP_JA = """使い方: sdg test-run --yaml YAML [--input INPUT | --dataset DATASET] [オプション]
+
+YAMLブループリントを1件のデータに対してテスト実行
+
+このコマンドは、AIエージェントの動作確認を素早く行うためのものです。
+入力データの1件目のみを処理し、詳細なログを出力します。
+
+必須引数:
+  --yaml YAML              YAMLブループリントパス
+
+データソース（いずれか1つを指定）:
+  --input INPUT            入力データセット (.jsonl または .csv)
+  --dataset DATASET        Hugging Face データセット名
+
+オプション引数:
+  -h, --help               このヘルプメッセージを表示して終了
+  --help.ja                このヘルプメッセージを日本語で表示して終了
+
+Hugging Face データセットオプション:
+  --subset SUBSET          データセットのサブセット名
+  --split SPLIT            データセットの分割 (デフォルト: train)
+  --mapping MAPPING        'orig:new' 形式のキーマッピング (複数回使用可)
+
+UIオプション:
+  --ui-locale {en,ja}      UIロケール (デフォルト: en)
+  --verbose, -v            詳細ログを有効化（デフォルト: 有効）
+  --no-verbose             詳細ログを無効化
+
+例:
+  # ローカルJSONLファイルでテスト実行
+  sdg test-run --yaml config.yaml --input data.jsonl
+
+  # ローカルCSVファイルでテスト実行
+  sdg test-run --yaml config.yaml --input data.csv
+
+  # Hugging Faceデータセットでテスト実行
+  sdg test-run --yaml config.yaml --dataset squad --split validation
+
+  # 日本語UIでテスト実行
+  sdg test-run --yaml config.yaml --input data.jsonl --ui-locale ja
 """
 
 # Legacy mode help message in Japanese
@@ -420,6 +466,113 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     return p
 
 
+def build_test_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Build argument parser for test-run command"""
+    p.add_argument("--yaml", required=True, help="YAML blueprint path")
+    p.add_argument("--input", help="Input dataset (.jsonl or .csv)")
+
+    # Hugging Face Dataset options
+    p.add_argument("--dataset", help="Hugging Face dataset name")
+    p.add_argument("--subset", help="Dataset subset name")
+    p.add_argument(
+        "--split", default="train", help="Dataset split (default: train)"
+    )
+    p.add_argument(
+        "--mapping",
+        action="append",
+        help="Key mapping in format 'orig:new' (can be used multiple times)",
+    )
+    p.add_argument(
+        "--help.ja", action="store_true", help="Show this help message in Japanese"
+    )
+    
+    # UI locale option
+    p.add_argument(
+        "--ui-locale",
+        choices=["en", "ja"],
+        default="en",
+        help="UI locale for log output (default: en)",
+    )
+
+    # Verbose option (default: True for test-run)
+    p.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        default=True,
+        help="Enable verbose logging (default: enabled for test-run)",
+    )
+    p.add_argument(
+        "--no-verbose",
+        action="store_true",
+        help="Disable verbose logging",
+    )
+
+    return p
+
+
+def _execute_test_run(args):
+    """Execute the test-run command based on args"""
+    from .logger import init_logger
+    
+    # Get locale from --ui-locale parameter
+    locale = getattr(args, 'ui_locale', 'en')
+    
+    # Initialize logger for validation messages
+    logger = init_logger(
+        verbose=True,
+        quiet=False,
+        use_rich=True,
+        locale=locale,
+    )
+    
+    # Validation
+    if not args.input and not args.dataset:
+        logger.error("Either --input or --dataset must be provided.")
+        sys.exit(1)
+    if args.input and args.dataset:
+        logger.error("Cannot specify both --input and --dataset.")
+        sys.exit(1)
+
+    # Parse mapping
+    mapping = {}
+    if args.mapping:
+        for m in args.mapping:
+            if ":" not in m:
+                print(
+                    f"Error: Invalid mapping format '{m}'. Expected 'orig:new'.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            k, v = m.split(":", 1)
+            mapping[k] = v
+
+    # Determine verbose setting
+    verbose = args.verbose and not args.no_verbose
+
+    # Execute test run
+    try:
+        result = test_run(
+            yaml_path=args.yaml,
+            input_path=args.input,
+            dataset_name=args.dataset,
+            subset=args.subset,
+            split=args.split,
+            mapping=mapping if mapping else None,
+            verbose=verbose,
+            locale=locale,
+        )
+        
+        # Print result as JSON for programmatic use
+        import json
+        print("\n--- Result JSON ---")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        
+    except Exception as e:
+        logger.error(f"Test run failed: {e}")
+        sys.exit(1)
+
+
 def _execute_run(args):
     """Execute the run command based on args"""
     # Initialize logger
@@ -608,13 +761,17 @@ def main():
     if "--help.ja" in argv:
         # Backward compatibility: detect legacy mode
         legacy_mode = (
-            len(argv) > 0 and not argv[0] in {"run"} and argv[0].startswith("--")
+            len(argv) > 0 and not argv[0] in {"run", "test-run"} and argv[0].startswith("--")
         )
 
-        # Determine if this is for 'run' subcommand, legacy mode, or main help
+        # Determine if this is for 'run' subcommand, 'test-run' subcommand, legacy mode, or main help
         if len(argv) >= 2 and argv[0] == "run":
             # sdg run --help.ja
             print(RUN_HELP_JA)
+            sys.exit(0)
+        elif len(argv) >= 2 and argv[0] == "test-run":
+            # sdg test-run --help.ja
+            print(TEST_RUN_HELP_JA)
             sys.exit(0)
         elif legacy_mode:
             # sdg --yaml ... --help.ja (legacy mode)
@@ -626,7 +783,7 @@ def main():
             sys.exit(0)
 
     # Backward compatibility: support legacy usage `sdg --yaml ...`
-    legacy_mode = len(argv) > 0 and not argv[0] in {"run"} and argv[0].startswith("--")
+    legacy_mode = len(argv) > 0 and not argv[0] in {"run", "test-run"} and argv[0].startswith("--")
 
     if legacy_mode:
         p = argparse.ArgumentParser(
@@ -637,7 +794,7 @@ def main():
         _execute_run(args)
         return
 
-    # Subcommand style: `sdg run --yaml ...`
+    # Subcommand style: `sdg run --yaml ...` or `sdg test-run --yaml ...`
     p = argparse.ArgumentParser(description="SDG (Scalable Data Generator) CLI")
     sub = p.add_subparsers(dest="command")
     # Python 3.10 supports required for subparsers
@@ -646,10 +803,20 @@ def main():
     except Exception:
         pass
 
+    # run subcommand
     run_p = sub.add_parser("run", help="Run a YAML blueprint over an input dataset")
     build_run_parser(run_p)
+
+    # test-run subcommand
+    test_run_p = sub.add_parser(
+        "test-run",
+        help="Test run a YAML blueprint with a single data item for verification"
+    )
+    build_test_run_parser(test_run_p)
 
     args = p.parse_args(argv)
 
     if args.command == "run":
         _execute_run(args)
+    elif args.command == "test-run":
+        _execute_test_run(args)
