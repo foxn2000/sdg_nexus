@@ -40,6 +40,62 @@ sdg run --yaml examples/sdg_demo.yaml --input examples/data/input.jsonl --output
 sdg run --yaml examples/sdg_demo.yaml --dataset squad --split validation --output output/result.jsonl
 ```
 
+### テスト実行コマンド
+
+[`test-run`](../sdg/cli.py:469)コマンドを使用すると、YAMLブループリントの動作を素早く確認できます。最初のデータ項目のみを処理し、デフォルトで詳細ログが有効になっています。
+
+**基本的な使用方法:**
+
+```bash
+# ローカルJSONLファイルでテスト実行
+sdg test-run --yaml examples/sdg_demo.yaml --input examples/data/input.jsonl
+
+# ローカルCSVファイルでテスト実行
+sdg test-run --yaml examples/sdg_demo.yaml --input data.csv
+
+# Hugging Faceデータセットでテスト実行
+sdg test-run --yaml examples/sdg_demo.yaml --dataset squad --split validation
+
+# 日本語UIでテスト実行
+sdg test-run --yaml examples/sdg_demo.yaml --input data.jsonl --ui-locale ja
+```
+
+**オプション:**
+
+| オプション | 説明 |
+|--------|-------------|
+| `--yaml YAML` | YAMLブループリントパス（必須） |
+| `--input INPUT` | 入力データセット（.jsonl または .csv） |
+| `--dataset DATASET` | Hugging Face データセット名 |
+| `--subset SUBSET` | データセットのサブセット名 |
+| `--split SPLIT` | データセットの分割（デフォルト: train） |
+| `--mapping MAPPING` | 'orig:new' 形式のキーマッピング（複数回使用可） |
+| `--ui-locale {en,ja}` | ログ出力のUI言語（デフォルト: en） |
+| `--verbose`, `-v` | 詳細ログを有効化（デフォルト: 有効） |
+| `--no-verbose` | 詳細ログを無効化 |
+
+**特徴:**
+
+- 素早い検証のため、最初のデータ項目のみを処理
+- 詳細ログがデフォルトで有効（`--no-verbose`で無効化可能）
+- 詳細な実行ログと最終結果をJSONとして出力
+- ローカルファイル（JSONL/CSV）とHugging Face Datasetsの両方をサポート
+- 本番実行前のYAMLブループリントのデバッグと検証に便利
+
+**出力例:**
+
+```bash
+$ sdg test-run --yaml config.yaml --input data.jsonl
+[詳細な実行ログ...]
+
+--- Result JSON ---
+{
+  "answer": "AIは人工知能のことで...",
+  "status": "success",
+  "_row_index": 0
+}
+```
+
 ### ログ出力オプション
 
 SDGは、`rich`ライブラリを使用した美しく読みやすいログ出力を提供します。

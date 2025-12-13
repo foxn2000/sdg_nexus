@@ -159,6 +159,14 @@ sdg run \
   --output output/result.jsonl
 ```
 
+Quick test with a single data item:
+
+```bash
+sdg test-run \
+  --yaml examples/sdg_demo_v2.yaml \
+  --input examples/data/input.jsonl
+```
+
 With verbose logging (detailed debug output):
 
 ```bash

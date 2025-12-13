@@ -40,6 +40,62 @@ sdg run --yaml examples/sdg_demo.yaml --input examples/data/input.jsonl --output
 sdg run --yaml examples/sdg_demo.yaml --dataset squad --split validation --output output/result.jsonl
 ```
 
+### Test Run Command
+
+The [`test-run`](../sdg/cli.py:469) command allows you to quickly verify your YAML blueprint by processing only the first data item with detailed logging enabled by default.
+
+**Basic Usage:**
+
+```bash
+# Test with local JSONL file
+sdg test-run --yaml examples/sdg_demo.yaml --input examples/data/input.jsonl
+
+# Test with local CSV file
+sdg test-run --yaml examples/sdg_demo.yaml --input data.csv
+
+# Test with Hugging Face dataset
+sdg test-run --yaml examples/sdg_demo.yaml --dataset squad --split validation
+
+# Test with Japanese UI
+sdg test-run --yaml examples/sdg_demo.yaml --input data.jsonl --ui-locale ja
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--yaml YAML` | YAML blueprint path (required) |
+| `--input INPUT` | Input dataset (.jsonl or .csv) |
+| `--dataset DATASET` | Hugging Face dataset name |
+| `--subset SUBSET` | Dataset subset name |
+| `--split SPLIT` | Dataset split (default: train) |
+| `--mapping MAPPING` | Key mapping in format 'orig:new' (can be used multiple times) |
+| `--ui-locale {en,ja}` | UI locale for log output (default: en) |
+| `--verbose`, `-v` | Enable verbose logging (default: enabled) |
+| `--no-verbose` | Disable verbose logging |
+
+**Features:**
+
+- Processes only the first data item for quick verification
+- Verbose logging enabled by default (can be disabled with `--no-verbose`)
+- Outputs detailed execution logs and final result as JSON
+- Supports both local files (JSONL/CSV) and Hugging Face datasets
+- Useful for debugging and validating YAML blueprints before full runs
+
+**Example Output:**
+
+```bash
+$ sdg test-run --yaml config.yaml --input data.jsonl
+[Detailed execution logs...]
+
+--- Result JSON ---
+{
+  "answer": "AI is artificial intelligence...",
+  "status": "success",
+  "_row_index": 0
+}
+```
+
 ### Logging Options
 
 SDG provides beautiful and readable log output using the `rich` library.

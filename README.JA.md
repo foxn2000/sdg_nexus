@@ -164,6 +164,14 @@ sdg run \
   --output output/result.jsonl
 ```
 
+1件のデータで素早くテスト:
+
+```bash
+sdg test-run \
+  --yaml examples/sdg_demo_v2.yaml \
+  --input examples/data/input.jsonl
+```
+
 詳細ログを有効化して実行:
 
 ```bash
