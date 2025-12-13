@@ -162,6 +162,7 @@ UIオプション:
   --ui-locale {en,ja}      UIロケール (デフォルト: en)
   --verbose, -v            詳細ログを有効化（デフォルト: 有効）
   --no-verbose             詳細ログを無効化
+  --meta                   最終結果にメタ情報を表示（実行時間、行インデックスなど）
 
 例:
   # ローカルJSONLファイルでテスト実行
@@ -507,6 +508,13 @@ def build_test_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser
         action="store_true",
         help="Disable verbose logging",
     )
+    
+    # Meta information display option
+    p.add_argument(
+        "--meta",
+        action="store_true",
+        help="Show meta information in final result (e.g., elapsed time, row index)",
+    )
 
     return p
 
@@ -561,12 +569,9 @@ def _execute_test_run(args):
             mapping=mapping if mapping else None,
             verbose=verbose,
             locale=locale,
+            show_meta=args.meta,
         )
-        
-        # Print result as JSON for programmatic use
-        import json
-        print("\n--- Result JSON ---")
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        # Result is already displayed by test_run using rich formatting
         
     except Exception as e:
         logger.error(f"Test run failed: {e}")

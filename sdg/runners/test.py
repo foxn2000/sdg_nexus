@@ -1,14 +1,22 @@
 from __future__ import annotations
 import asyncio
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable
 
-from ..config import load_config, PyBlock
-from ..executors import process_single_row
-from ..executors.ai import _build_clients
-from ..executors.core import ExecutionContext
-from ..executors.python import _load_python_function
-from ..logger import init_logger
+from ..config import (
+    load_config,
+    PyBlock,
+    AIBlock,
+    LogicBlock,
+    EndBlock,
+    OutputDef,
+)
+from ..executors.ai import _build_clients, _execute_ai_block_single
+from ..executors.core import ExecutionContext, _eval_cond, _execute_end_block_single
+from ..executors.logic import _apply_logic_block
+from ..executors.python import _load_python_function, _execute_python_block_single
+from ..logger import init_logger, SDGLogger
+from ..utils import render_template
 from ..io import (
     read_jsonl,
     read_csv,
@@ -17,10 +25,160 @@ from ..io import (
 )
 
 
+async def _test_run_pipeline(
+    cfg,
+    data: Dict[str, Any],
+    logger: SDGLogger,
+    clients: Dict[str, Any],
+    exec_ctx: ExecutionContext,
+    python_functions: Dict[str, Callable],
+) -> Dict[str, Any]:
+    """
+    テスト実行用のパイプライン処理。
+    
+    各ブロックの実行時に詳細なログを出力し、
+    AIの出力を視覚的に強調表示する。
+    
+    Args:
+        cfg: パイプライン設定
+        data: 入力データ（1件）
+        logger: SDGLoggerインスタンス
+        clients: LLMクライアント辞書
+        exec_ctx: 実行コンテキスト
+        python_functions: プリロードされたPython関数
+    
+    Returns:
+        実行結果の辞書
+    """
+    result: Dict[str, Any] = {}
+    ctx = dict(data)
+    total_blocks = len(cfg.blocks)
+    
+    for block_index, block in enumerate(cfg.blocks):
+        # グローバル変数をコンテキストに追加（run_if評価用）
+        extended_ctx = {
+            **exec_ctx.globals_const,
+            **exec_ctx.globals_vars,
+            **ctx,
+        }
+        
+        # run_if評価
+        run_ok = True
+        if block.run_if:
+            run_ok = _eval_cond(extended_ctx, block.run_if, exec_ctx)
+        
+        # ブロック名を取得
+        block_name = block.name or block.id or f"block_{block.exec}"
+        block_type = block.type or "unknown"
+        
+        if not run_ok:
+            logger.block_skipped(block_name, reason="run_if=False")
+            continue
+        
+        # ブロック開始ログ
+        extra_info = {}
+        if isinstance(block, AIBlock):
+            extra_info["model"] = block.model
+        
+        logger.block_start(
+            block_name=block_name,
+            block_type=block_type,
+            block_index=block_index,
+            total_blocks=total_blocks,
+            extra_info=extra_info if extra_info else None,
+        )
+        
+        block_start_time = time.time()
+        
+        try:
+            if isinstance(block, AIBlock):
+                # AIブロック: プロンプトと出力を詳細表示
+                
+                # プロンプトを構築して表示
+                ai_extended_ctx = {
+                    **exec_ctx.globals_const,
+                    **exec_ctx.globals_vars,
+                    **ctx,
+                }
+                raw_user_content = "\n\n".join(
+                    [render_template(p, ai_extended_ctx) for p in (block.prompts or [])]
+                )
+                logger.ai_prompt(raw_user_content, model=block.model)
+                
+                # AIブロック実行
+                out_map = await _execute_ai_block_single(
+                    block, ctx, cfg, clients, exec_ctx
+                )
+                
+                # AI出力を強調表示
+                for out_name, out_value in out_map.items():
+                    # 最初の出力を主要出力として扱う
+                    is_primary = (out_name == list(out_map.keys())[0])
+                    logger.ai_output(
+                        output=str(out_value),
+                        output_name=out_name,
+                        is_primary=is_primary,
+                    )
+                
+                result.update({f"_{block.exec}_{k}": v for k, v in out_map.items()})
+                ctx.update(out_map)
+                
+            elif isinstance(block, LogicBlock):
+                # Logicブロック
+                out_map = _apply_logic_block(block, ctx, exec_ctx)
+                
+                if out_map:
+                    logger.step(f"Logic output: {list(out_map.keys())}", step_type="data")
+                
+                result.update({f"_{block.exec}_{k}": v for k, v in out_map.items()})
+                ctx.update(out_map)
+                
+            elif isinstance(block, PyBlock):
+                # Pythonブロック
+                fn_key = f"{block.exec}_{block.function or block.entrypoint}"
+                if fn_key not in python_functions:
+                    python_functions[fn_key] = _load_python_function(block)
+                fn = python_functions[fn_key]
+                
+                out_map = _execute_python_block_single(block, ctx, cfg, exec_ctx, fn)
+                
+                if out_map:
+                    logger.step(f"Python output: {list(out_map.keys())}", step_type="data")
+                
+                result.update({f"_{block.exec}_{k}": v for k, v in out_map.items()})
+                ctx.update(out_map)
+                
+            elif isinstance(block, EndBlock):
+                # Endブロック
+                out_map = _execute_end_block_single(block, ctx, exec_ctx)
+                result.update(out_map)
+                
+                logger.step(f"Final output keys: {list(out_map.keys())}", step_type="success")
+            
+            else:
+                raise ValueError(f"Unknown block class: {type(block)}")
+            
+            # ブロック完了ログ
+            elapsed_ms = int((time.time() - block_start_time) * 1000)
+            logger.block_end(block_name, elapsed_ms=elapsed_ms, success=True)
+            
+        except Exception as e:
+            elapsed_ms = int((time.time() - block_start_time) * 1000)
+            logger.block_end(block_name, elapsed_ms=elapsed_ms, success=False)
+            logger.error(f"Block error: {e}")
+            
+            if block.on_error != "continue":
+                raise
+            # continue on error
+            ctx[f"error_block_{block.exec}"] = str(e)
+    
+    return result
+
+
 async def _test_run_async(
     cfg,
     data: Dict[str, Any],
-    logger,
+    logger: SDGLogger,
 ):
     """
     テスト実行用の非同期関数。
@@ -35,10 +193,11 @@ async def _test_run_async(
     Returns:
         実行結果の辞書
     """
-    logger.info("Starting test run with single data item...")
+    logger.separator("light")
+    logger.info("Starting pipeline execution...")
     
     # 入力データを表示
-    logger.table("Input Data", data)
+    logger.input_data(data)
     
     # パイプライン実行
     start_time = time.time()
@@ -56,21 +215,23 @@ async def _test_run_async(
     # 実行コンテキストを作成
     exec_ctx = ExecutionContext(cfg)
     
+    logger.separator("heavy")
+    
     try:
-        result = await process_single_row(
-            row_index=0,
-            initial_context=data,
+        result = await _test_run_pipeline(
             cfg=cfg,
+            data=data,
+            logger=logger,
             clients=clients,
             exec_ctx=exec_ctx,
-            save_intermediate=True,  # 中間結果を保存
             python_functions=python_functions,
         )
         
         elapsed_time = time.time() - start_time
         
-        # process_single_row returns a Dict, not StreamingResult
+        logger.separator("heavy")
         logger.success(f"Pipeline execution completed in {elapsed_time:.2f}s")
+        
         return {
             "_row_index": 0,
             "_elapsed_time_ms": int(elapsed_time * 1000),
@@ -78,6 +239,7 @@ async def _test_run_async(
         }
     except Exception as e:
         elapsed_time = time.time() - start_time
+        logger.separator("heavy")
         logger.error(f"Pipeline execution error: {e}")
         return {
             "_row_index": 0,
@@ -97,6 +259,7 @@ def test_run(
     # UI options
     verbose: bool = True,
     locale: str = "en",
+    show_meta: bool = False,
 ) -> Dict[str, Any]:
     """
     テスト実行: YAMLブループリントを1件のデータに対して実行し、動作確認を行う。
@@ -113,6 +276,7 @@ def test_run(
         mapping: キーマッピング辞書
         verbose: 詳細ログを有効化（デフォルト: True）
         locale: UIロケール ('en' or 'ja')
+        show_meta: メタ情報を表示するか（デフォルト: False）
 
     Returns:
         実行結果の辞書
@@ -220,46 +384,14 @@ def test_run(
     result = asyncio.run(_test_run_async(cfg, data, logger))
     
     # 結果を表示
-    if locale == "ja":
-        logger.info("実行結果:")
-    else:
-        logger.info("Execution Result:")
+    logger.separator("double")
     
-    # 結果をテーブル形式で表示
-    result_display = {}
-    for key, value in result.items():
-        if key.startswith("_"):
-            continue
-        # 長い値は省略
-        str_value = str(value)
-        if len(str_value) > 100:
-            str_value = str_value[:100] + "..."
-        result_display[key] = str_value
+    # 結果サマリーを表示（コンパクトなステータス表示）
+    elapsed_time = result.get("_elapsed_time_ms", 0) / 1000
+    logger.result_summary(result, elapsed_time=elapsed_time)
     
-    if result_display:
-        if locale == "ja":
-            logger.table("出力データ", result_display)
-        else:
-            logger.table("Output Data", result_display)
-    
-    # メタ情報を表示
-    meta_info = {}
-    if "_elapsed_time_ms" in result:
-        if locale == "ja":
-            meta_info["実行時間"] = f"{result['_elapsed_time_ms']}ms"
-        else:
-            meta_info["Elapsed Time"] = f"{result['_elapsed_time_ms']}ms"
-    if "_error" in result:
-        if locale == "ja":
-            meta_info["エラー"] = result["_error"]
-        else:
-            meta_info["Error"] = result["_error"]
-    
-    if meta_info:
-        if locale == "ja":
-            logger.table("メタ情報", meta_info)
-        else:
-            logger.table("Meta Information", meta_info)
+    # 結果JSONを見やすく表示
+    logger.result_json(result, show_meta=show_meta)
     
     # 統計情報を表示
     stats = {
