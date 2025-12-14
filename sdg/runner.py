@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .io import (
     AsyncBufferedWriter,
+    count_lines_fast,
     read_jsonl,
     read_csv,
     read_hf_dataset,
@@ -16,6 +17,7 @@ from .runners.test import test_run
 
 __all__ = [
     "AsyncBufferedWriter",
+    "count_lines_fast",
     "read_jsonl",
     "read_csv",
     "read_hf_dataset",

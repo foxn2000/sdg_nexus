@@ -1,7 +1,7 @@
 from __future__ import annotations
 import asyncio
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from ..config import (
     SDGConfig,
@@ -46,7 +46,7 @@ except ImportError:
 
 async def run_pipeline_streaming_adaptive_batched(
     cfg: SDGConfig,
-    dataset: List[Dict[str, Any]],
+    dataset: Iterable[Dict[str, Any]],
     *,
     max_concurrent: int = 64,
     min_concurrent: int = 1,
@@ -76,7 +76,7 @@ async def run_pipeline_streaming_adaptive_batched(
 
     Args:
         cfg: SDG設定
-        dataset: 入力データセット
+        dataset: 入力データセット（イテラブル）
         max_concurrent: 同時処理行数の上限 (デフォルト: 64)
         min_concurrent: 同時処理行数の下限 (デフォルト: 1)
         target_latency_ms: 目標P95レイテンシ (ミリ秒、デフォルト: 3000)
@@ -200,9 +200,9 @@ async def run_pipeline_streaming_adaptive_batched(
     # 結果キュー
     result_queue: asyncio.Queue[StreamingResult] = asyncio.Queue()
 
-    # 処理完了カウンター
+    # 処理完了カウンター（totalは事前に不明な場合がある）
     completed = 0
-    total = len(dataset)
+    total_started = 0
 
     # メトリクス更新タスク
     metrics_update_task: Optional[asyncio.Task] = None
@@ -436,15 +436,22 @@ async def run_pipeline_streaming_adaptive_batched(
         if metrics_collector is not None:
             metrics_update_task = asyncio.create_task(update_metrics_loop())
 
-        async def progressive_task_launcher_batched():
+        async def progressive_task_launcher_batched(data_iter):
             """
             Progressive Task Launcher (Batched版) - セマフォ容量に応じて段階的にタスクを起動
-            """
-            tasks: List[asyncio.Task] = []
-            next_index = 0
-            active_count = 0
 
-            while next_index < total or active_count > 0:
+            Args:
+                data_iter: データのイテレータ
+            """
+            nonlocal total_started
+            tasks: List[asyncio.Task] = []
+            active_count = 0
+            data_exhausted = False
+
+            # イテレータをイテレート可能にする
+            data_iterator = iter(data_iter)
+
+            while not data_exhausted or active_count > 0:
                 # 現在のセマフォ容量を取得
                 current_capacity = controller.current_concurrency
                 available_slots = controller.get_available_slots()
@@ -456,21 +463,23 @@ async def run_pipeline_streaming_adaptive_batched(
                     min(
                         current_capacity - pending_tasks,
                         available_slots,
-                        total - next_index,
                     ),
                 )
 
                 # 新しいタスクを起動
                 for _ in range(slots_to_fill):
-                    if next_index < total:
-                        row_index = next_index
-                        row_data = dataset[row_index]
+                    try:
+                        row_data = next(data_iterator)
+                        row_index = total_started
                         task = asyncio.create_task(
                             process_row_batched(row_index, row_data)
                         )
                         tasks.append(task)
-                        next_index += 1
+                        total_started += 1
                         active_count += 1
+                    except StopIteration:
+                        data_exhausted = True
+                        break
 
                 # 結果を待つ
                 if active_count > 0:
@@ -498,9 +507,10 @@ async def run_pipeline_streaming_adaptive_batched(
             async for item in scheduler.schedule(dataset):
                 task = asyncio.create_task(process_row_batched(item.index, item.data))
                 tasks.append(task)
+                total_started += 1
 
             # 完了した結果を順次yield
-            while completed < total:
+            while completed < total_started:
                 result = await result_queue.get()
                 completed += 1
                 yield result
@@ -509,7 +519,7 @@ async def run_pipeline_streaming_adaptive_batched(
             await asyncio.gather(*tasks)
         else:
             # Progressive Task Launcher を使用してタスクを段階的に起動
-            async for result in progressive_task_launcher_batched():
+            async for result in progressive_task_launcher_batched(dataset):
                 completed += 1
                 yield result
 

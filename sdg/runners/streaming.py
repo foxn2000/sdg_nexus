@@ -1,12 +1,13 @@
 from __future__ import annotations
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from ..config import load_config
 from ..executors import run_pipeline_streaming
 from ..logger import get_logger
 from ..io import (
     AsyncBufferedWriter,
+    count_lines_fast,
     read_jsonl,
     read_csv,
     read_hf_dataset,
@@ -16,7 +17,7 @@ from ..io import (
 
 async def _run_streaming_async(
     cfg,
-    dataset: List[Dict[str, Any]],
+    dataset: Iterable[Dict[str, Any]],
     output_path: str,
     max_concurrent: int,
     save_intermediate: bool,
@@ -32,6 +33,8 @@ async def _run_streaming_async(
     enable_memory_optimization: bool = False,
     max_cache_size: int = 500,
     enable_memory_monitoring: bool = False,
+    # Total count (optional, for progress display)
+    total: Optional[int] = None,
 ):
     """
     ストリーミング版パイプライン実行（非同期）。
@@ -41,7 +44,7 @@ async def _run_streaming_async(
 
     Args:
         cfg: パイプライン設定
-        dataset: 入力データセット
+        dataset: 入力データセット（イテラブル）
         output_path: 出力ファイルパス
         max_concurrent: 最大並行処理数
         save_intermediate: 中間結果を保存するか
@@ -49,14 +52,14 @@ async def _run_streaming_async(
         buffer_size: バッファサイズ（件数）
         flush_interval: 定期フラッシュ間隔（秒）
         clean_output: 出力をクリーニングするか
+        total: 総データ数（不明な場合はNone）
 
     Returns:
         (完了数, エラー数) のタプル
     """
-    total = len(dataset)
     completed = 0
     errors = 0
-    
+
     logger = get_logger()
     progress = logger.create_progress() if show_progress else None
 
@@ -69,8 +72,14 @@ async def _run_streaming_async(
     ) as writer:
         if progress:
             with progress:
-                task = progress.add_task(f"[cyan]Processing {total} rows...", total=total)
-                
+                # 総数が不明な場合は「処理済み件数」のみを表示
+                if total is not None:
+                    task = progress.add_task(
+                        f"[cyan]Processing {total} rows...", total=total
+                    )
+                else:
+                    task = progress.add_task("[cyan]Processing rows...", total=None)
+
                 async for result in run_pipeline_streaming(
                     cfg,
                     dataset,
@@ -102,7 +111,7 @@ async def _run_streaming_async(
                             **result.data,
                         }
                         await writer.write(result_data)
-                    
+
                     progress.update(task, advance=1)
         else:
             # プログレス表示なしの場合
@@ -139,9 +148,9 @@ async def _run_streaming_async(
     if show_progress:
         if writer.total_cleaned > 0:
             logger.info(f"Cleaned {writer.total_cleaned} invalid JSON lines")
-        
+
         stats = {
-            "total": total,
+            "total": total if total is not None else completed,
             "completed": completed,
             "errors": errors,
         }
@@ -224,16 +233,29 @@ def run_streaming(
         "retry_on_empty": retry_on_empty,
     }
 
-    # load data
+    # load data and count lines for progress display
+    total: Optional[int] = None
     if input_path:
         if input_path.endswith(".jsonl"):
+            # 高速行数カウント（wcコマンド使用）
+            total = count_lines_fast(input_path)
+            if max_inputs is not None and total is not None:
+                total = min(total, max_inputs)
             ds = read_jsonl(input_path, max_inputs=max_inputs)
         elif input_path.endswith(".csv"):
+            # CSVの場合は行数カウント（ヘッダー行を除く）
+            line_count = count_lines_fast(input_path)
+            if line_count is not None:
+                total = line_count - 1  # ヘッダー行を除く
+                if max_inputs is not None:
+                    total = min(total, max_inputs)
             ds = read_csv(input_path, max_inputs=max_inputs)
         else:
             raise ValueError("Unsupported input format. Use .jsonl or .csv")
     elif dataset_name:
         ds = read_hf_dataset(dataset_name, subset, split, max_inputs=max_inputs)
+        # HF Datasetの場合は総数が不明（streaming=True）
+        total = max_inputs  # max_inputsが指定されていればそれを使用
     else:
         raise ValueError("Either input_path or dataset_name must be provided")
 
@@ -244,18 +266,26 @@ def run_streaming(
     # Print dataset info
     logger = get_logger()
     if show_progress:
-        subtitle = "Fixed concurrency streaming processing" if logger.locale == "en" else "固定並行数ストリーミング処理"
+        subtitle = (
+            "Fixed concurrency streaming processing"
+            if logger.locale == "en"
+            else "固定並行数ストリーミング処理"
+        )
         logger.header("SDG Pipeline - Streaming Mode", subtitle)
-        
+
+        # 総数の表示（不明な場合は「不明」と表示）
+        total_str = str(total) if total is not None else "unknown"
         if logger.locale == "ja":
             config_info = {
-                "入力データ数": f"{len(ds)}" + (f" (--max-inputs {max_inputs}で制限)" if max_inputs else ""),
+                "入力データ数": total_str
+                + (f" (--max-inputs {max_inputs}で制限)" if max_inputs else ""),
                 "並行処理数": max_concurrent,
             }
             logger.table("実行設定", config_info)
         else:
             config_info = {
-                "Input Data Count": f"{len(ds)}" + (f" (limited by --max-inputs {max_inputs})" if max_inputs else ""),
+                "Input Data Count": total_str
+                + (f" (limited by --max-inputs {max_inputs})" if max_inputs else ""),
                 "Concurrency": max_concurrent,
             }
             logger.table("Execution Configuration", config_info)
@@ -276,5 +306,6 @@ def run_streaming(
             enable_memory_optimization=enable_memory_optimization,
             max_cache_size=max_cache_size,
             enable_memory_monitoring=enable_memory_monitoring,
+            total=total,
         )
     )

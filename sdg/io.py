@@ -3,9 +3,20 @@ import asyncio
 import csv
 import json
 import os
+import subprocess
 import sys
 import time
-from typing import Any, Callable, ClassVar, Dict, Iterable, List, Optional
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Union,
+)
 
 import aiofiles
 import aiofiles.os
@@ -345,52 +356,83 @@ class AsyncBufferedWriter:
         return len(self._buffer) + len(self._fallback_buffer)
 
 
-def read_jsonl(path: str, max_inputs: Optional[int] = None) -> List[Dict[str, Any]]:
+def count_lines_fast(path: str) -> Optional[int]:
     """
-    JSONLファイルを読み込む。
+    ファイルの行数を高速にカウントする。
+
+    wcコマンドを使用して高速に行数をカウントする。
+    テラバイト級のファイルでも効率的に行数を取得可能。
+    wcコマンドが利用できない場合はNoneを返す。
+
+    Args:
+        path: ファイルパス
+
+    Returns:
+        行数（カウントできない場合はNone）
+    """
+    try:
+        # wcコマンドで高速カウント
+        result = subprocess.run(
+            ["wc", "-l", path],
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5分タイムアウト
+        )
+        if result.returncode == 0:
+            # 出力形式: "  12345 filename"
+            count_str = result.stdout.strip().split()[0]
+            return int(count_str)
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError, IndexError):
+        pass
+    return None
+
+
+def read_jsonl(path: str, max_inputs: Optional[int] = None) -> Iterator[Dict[str, Any]]:
+    """
+    JSONLファイルをジェネレータとして読み込む（省メモリ版）。
+
+    テラバイト級のファイルでもメモリ効率的に処理可能。
+    ファイルはジェネレータが消費されるまで開いたままになる。
 
     Args:
         path: 入力ファイルパス
         max_inputs: 読み込む最大行数（Noneの場合は全件）
 
-    Returns:
-        各行をパースした辞書のリスト
+    Yields:
+        各行をパースした辞書
     """
+    count = 0
     with open(path, "r", encoding="utf-8") as f:
-        if max_inputs is None:
-            return [json.loads(line) for line in f if line.strip()]
-        else:
-            result = []
-            for i, line in enumerate(f):
-                if i >= max_inputs:
-                    break
-                if line.strip():
-                    result.append(json.loads(line))
-            return result
+        for line in f:
+            if max_inputs is not None and count >= max_inputs:
+                break
+            if line.strip():
+                yield json.loads(line)
+                count += 1
 
 
-def read_csv(path: str, max_inputs: Optional[int] = None) -> List[Dict[str, Any]]:
+def read_csv(path: str, max_inputs: Optional[int] = None) -> Iterator[Dict[str, Any]]:
     """
-    CSVファイルを読み込む。
+    CSVファイルをジェネレータとして読み込む（省メモリ版）。
+
+    テラバイト級のファイルでもメモリ効率的に処理可能。
+    ファイルはジェネレータが消費されるまで開いたままになる。
 
     Args:
         path: 入力ファイルパス
         max_inputs: 読み込む最大行数（Noneの場合は全件）
 
-    Returns:
-        各行を辞書に変換したリスト
+    Yields:
+        各行を辞書に変換したもの
     """
+    count = 0
     with open(path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        if max_inputs is None:
-            return list(reader)
-        else:
-            result = []
-            for i, row in enumerate(reader):
-                if i >= max_inputs:
-                    break
-                result.append(row)
-            return result
+        for row in reader:
+            if max_inputs is not None and count >= max_inputs:
+                break
+            yield dict(row)  # OrderedDictを通常のdictに変換
+            count += 1
 
 
 def read_hf_dataset(
@@ -398,9 +440,9 @@ def read_hf_dataset(
     subset: Optional[str] = None,
     split: str = "train",
     max_inputs: Optional[int] = None,
-) -> List[Dict[str, Any]]:
+) -> Iterator[Dict[str, Any]]:
     """
-    Hugging Face Datasetを読み込む。
+    Hugging Face Datasetをジェネレータとして読み込む（省メモリ版）。
 
     Args:
         dataset_name: データセット名
@@ -408,8 +450,8 @@ def read_hf_dataset(
         split: スプリット名（デフォルト: train）
         max_inputs: 読み込む最大行数（Noneの場合は全件）
 
-    Returns:
-        辞書のリスト
+    Yields:
+        辞書
     """
     try:
         from datasets import load_dataset
@@ -423,44 +465,39 @@ def read_hf_dataset(
     logger.info(
         f"Loading Hugging Face dataset: {dataset_name} (subset={subset}, split={split})..."
     )
-    ds = load_dataset(dataset_name, name=subset, split=split)
+    ds = load_dataset(dataset_name, name=subset, split=split, streaming=True)
 
-    # Convert to list of dicts
-    if max_inputs is None:
-        return [item for item in ds]
-    else:
-        result = []
-        for i, item in enumerate(ds):
-            if i >= max_inputs:
-                break
-            result.append(item)
-        return result
+    count = 0
+    for item in ds:
+        if max_inputs is not None and count >= max_inputs:
+            break
+        yield dict(item)
+        count += 1
 
 
 def apply_mapping(
-    dataset: List[Dict[str, Any]], mapping: Dict[str, str]
-) -> List[Dict[str, Any]]:
+    dataset: Iterable[Dict[str, Any]], mapping: Dict[str, str]
+) -> Iterator[Dict[str, Any]]:
     """
-    データセットのキーをマッピングに従って変更する。
+    データセットのキーをマッピングに従って変更する（ジェネレータ版）。
 
     Args:
-        dataset: データセット（辞書のリスト）
+        dataset: データセット（辞書のイテラブル）
         mapping: マッピング辞書 {old_key: new_key}
 
-    Returns:
-        キーが変更された新しいデータセット
+    Yields:
+        キーが変更された辞書
     """
     if not mapping:
-        return dataset
+        yield from dataset
+        return
 
-    mapped_dataset = []
     for item in dataset:
         new_item = item.copy()
         for old_key, new_key in mapping.items():
             if old_key in new_item:
                 new_item[new_key] = new_item.pop(old_key)
-        mapped_dataset.append(new_item)
-    return mapped_dataset
+        yield new_item
 
 
 def write_jsonl(path: str, rows: Iterable[Dict[str, Any]]) -> None:

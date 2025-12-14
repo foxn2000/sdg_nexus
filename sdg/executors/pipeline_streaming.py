@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from ..config import SDGConfig, PyBlock
 from .core import ExecutionContext, StreamingResult
@@ -17,7 +17,7 @@ from .pipeline_core import process_single_row
 
 async def run_pipeline_streaming(
     cfg: SDGConfig,
-    dataset: List[Dict[str, Any]],
+    dataset: Iterable[Dict[str, Any]],
     *,
     max_concurrent: int = 8,
     save_intermediate: bool = False,
@@ -35,7 +35,7 @@ async def run_pipeline_streaming(
 
     Args:
         cfg: SDG設定
-        dataset: 入力データセット
+        dataset: 入力データセット（イテラブル）
         max_concurrent: 同時処理行数の上限
         save_intermediate: 中間結果を保存するか
         max_pending_tasks: 最大保留タスク数（スケジューリング有効時）
@@ -64,9 +64,9 @@ async def run_pipeline_streaming(
     # 結果キュー
     result_queue: asyncio.Queue[StreamingResult] = asyncio.Queue()
 
-    # 処理完了カウンター
+    # 処理完了カウンター（totalは事前に不明な場合がある）
     completed = 0
-    total = len(dataset)
+    total_started = 0
 
     # Phase 2: 階層的タスクスケジューラの初期化
     scheduler_config = SchedulerConfig(
@@ -130,9 +130,10 @@ async def run_pipeline_streaming(
             async for item in scheduler.schedule(dataset):
                 task = asyncio.create_task(process_row(item.index, item.data))
                 tasks.append(task)
+                total_started += 1
 
             # 完了した結果を順次yield
-            while completed < total:
+            while completed < total_started:
                 result = await result_queue.get()
                 completed += 1
                 yield result
@@ -140,14 +141,15 @@ async def run_pipeline_streaming(
             # すべてのタスク完了を待機
             await asyncio.gather(*tasks)
         else:
-            # 従来の動作: 全行のタスクを一度に起動
-            tasks = [
-                asyncio.create_task(process_row(i, row))
-                for i, row in enumerate(dataset)
-            ]
+            # 従来の動作: イテラブルからタスクを作成（省メモリ版）
+            tasks = []
+            for i, row in enumerate(dataset):
+                task = asyncio.create_task(process_row(i, row))
+                tasks.append(task)
+                total_started += 1
 
             # 完了した結果を順次yield
-            while completed < total:
+            while completed < total_started:
                 result = await result_queue.get()
                 completed += 1
                 yield result
