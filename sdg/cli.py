@@ -158,6 +158,9 @@ Hugging Face データセットオプション:
   --split SPLIT            データセットの分割 (デフォルト: train)
   --mapping MAPPING        'orig:new' 形式のキーマッピング (複数回使用可)
 
+データ選択オプション:
+  --random-input           データの先頭から最大100件の中からランダムに1件を選択
+
 UIオプション:
   --ui-locale {en,ja}      UIロケール (デフォルト: en)
   --verbose, -v            詳細ログを有効化（デフォルト: 有効）
@@ -167,6 +170,9 @@ UIオプション:
 例:
   # ローカルJSONLファイルでテスト実行
   sdg test-run --yaml config.yaml --input data.jsonl
+
+  # ランダムに1件選択してテスト実行
+  sdg test-run --yaml config.yaml --input data.jsonl --random-input
 
   # ローカルCSVファイルでテスト実行
   sdg test-run --yaml config.yaml --input data.csv
@@ -262,9 +268,7 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     # Hugging Face Dataset options
     p.add_argument("--dataset", help="Hugging Face dataset name")
     p.add_argument("--subset", help="Dataset subset name")
-    p.add_argument(
-        "--split", default="train", help="Dataset split (default: train)"
-    )
+    p.add_argument("--split", default="train", help="Dataset split (default: train)")
     p.add_argument(
         "--mapping",
         action="append",
@@ -273,7 +277,7 @@ def build_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     p.add_argument(
         "--help.ja", action="store_true", help="Show this help message in Japanese"
     )
-    
+
     # UI locale option
     p.add_argument(
         "--ui-locale",
@@ -475,9 +479,7 @@ def build_test_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser
     # Hugging Face Dataset options
     p.add_argument("--dataset", help="Hugging Face dataset name")
     p.add_argument("--subset", help="Dataset subset name")
-    p.add_argument(
-        "--split", default="train", help="Dataset split (default: train)"
-    )
+    p.add_argument("--split", default="train", help="Dataset split (default: train)")
     p.add_argument(
         "--mapping",
         action="append",
@@ -486,7 +488,7 @@ def build_test_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser
     p.add_argument(
         "--help.ja", action="store_true", help="Show this help message in Japanese"
     )
-    
+
     # UI locale option
     p.add_argument(
         "--ui-locale",
@@ -508,12 +510,19 @@ def build_test_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser
         action="store_true",
         help="Disable verbose logging",
     )
-    
+
     # Meta information display option
     p.add_argument(
         "--meta",
         action="store_true",
         help="Show meta information in final result (e.g., elapsed time, row index)",
+    )
+
+    # Random input selection option
+    p.add_argument(
+        "--random-input",
+        action="store_true",
+        help="Randomly select one item from the first 100 data items",
     )
 
     return p
@@ -522,10 +531,10 @@ def build_test_run_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser
 def _execute_test_run(args):
     """Execute the test-run command based on args"""
     from .logger import init_logger
-    
+
     # Get locale from --ui-locale parameter
-    locale = getattr(args, 'ui_locale', 'en')
-    
+    locale = getattr(args, "ui_locale", "en")
+
     # Initialize logger for validation messages
     logger = init_logger(
         verbose=True,
@@ -533,7 +542,7 @@ def _execute_test_run(args):
         use_rich=True,
         locale=locale,
     )
-    
+
     # Validation
     if not args.input and not args.dataset:
         logger.error("Either --input or --dataset must be provided.")
@@ -570,9 +579,10 @@ def _execute_test_run(args):
             verbose=verbose,
             locale=locale,
             show_meta=args.meta,
+            random_input=args.random_input,
         )
         # Result is already displayed by test_run using rich formatting
-        
+
     except Exception as e:
         logger.error(f"Test run failed: {e}")
         sys.exit(1)
@@ -582,15 +592,16 @@ def _execute_run(args):
     """Execute the run command based on args"""
     # Initialize logger
     from .logger import init_logger
+
     # Get locale from --ui-locale parameter
-    locale = getattr(args, 'ui_locale', 'en')
+    locale = getattr(args, "ui_locale", "en")
     logger = init_logger(
-        verbose=getattr(args, 'verbose', False),
+        verbose=getattr(args, "verbose", False),
         quiet=args.no_progress,
-        use_rich=not getattr(args, 'legacy_logs', False),
+        use_rich=not getattr(args, "legacy_logs", False),
         locale=locale,
     )
-    
+
     # Validation
     if not args.input and not args.dataset:
         logger.error("Either --input or --dataset must be provided.")
@@ -766,7 +777,9 @@ def main():
     if "--help.ja" in argv:
         # Backward compatibility: detect legacy mode
         legacy_mode = (
-            len(argv) > 0 and not argv[0] in {"run", "test-run"} and argv[0].startswith("--")
+            len(argv) > 0
+            and not argv[0] in {"run", "test-run"}
+            and argv[0].startswith("--")
         )
 
         # Determine if this is for 'run' subcommand, 'test-run' subcommand, legacy mode, or main help
@@ -788,7 +801,11 @@ def main():
             sys.exit(0)
 
     # Backward compatibility: support legacy usage `sdg --yaml ...`
-    legacy_mode = len(argv) > 0 and not argv[0] in {"run", "test-run"} and argv[0].startswith("--")
+    legacy_mode = (
+        len(argv) > 0
+        and not argv[0] in {"run", "test-run"}
+        and argv[0].startswith("--")
+    )
 
     if legacy_mode:
         p = argparse.ArgumentParser(
@@ -815,7 +832,7 @@ def main():
     # test-run subcommand
     test_run_p = sub.add_parser(
         "test-run",
-        help="Test run a YAML blueprint with a single data item for verification"
+        help="Test run a YAML blueprint with a single data item for verification",
     )
     build_test_run_parser(test_run_p)
 
