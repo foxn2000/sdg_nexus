@@ -373,13 +373,13 @@ def test_run(
         max_read = 100
         if input_path:
             if input_path.endswith(".jsonl"):
-                ds = read_jsonl(input_path, max_inputs=max_read)
+                ds = list(read_jsonl(input_path, max_inputs=max_read))
             elif input_path.endswith(".csv"):
-                ds = read_csv(input_path, max_inputs=max_read)
+                ds = list(read_csv(input_path, max_inputs=max_read))
             else:
                 raise ValueError("Unsupported input format. Use .jsonl or .csv")
         elif dataset_name:
-            ds = read_hf_dataset(dataset_name, subset, split, max_inputs=max_read)
+            ds = list(read_hf_dataset(dataset_name, subset, split, max_inputs=max_read))
         else:
             raise ValueError("Either input_path or dataset_name must be provided")
 
@@ -388,7 +388,7 @@ def test_run(
 
         # マッピングを適用
         if mapping:
-            ds = apply_mapping(ds, mapping)
+            ds = list(apply_mapping(ds, mapping))
 
         # ランダムに1件選択
         selected_index = random.randint(0, len(ds) - 1)
@@ -405,13 +405,13 @@ def test_run(
         # 通常の場合: 1件目を使用
         if input_path:
             if input_path.endswith(".jsonl"):
-                ds = read_jsonl(input_path, max_inputs=1)
+                ds = list(read_jsonl(input_path, max_inputs=1))
             elif input_path.endswith(".csv"):
-                ds = read_csv(input_path, max_inputs=1)
+                ds = list(read_csv(input_path, max_inputs=1))
             else:
                 raise ValueError("Unsupported input format. Use .jsonl or .csv")
         elif dataset_name:
-            ds = read_hf_dataset(dataset_name, subset, split, max_inputs=1)
+            ds = list(read_hf_dataset(dataset_name, subset, split, max_inputs=1))
         else:
             raise ValueError("Either input_path or dataset_name must be provided")
 
@@ -420,7 +420,7 @@ def test_run(
 
         # マッピングを適用
         if mapping:
-            ds = apply_mapping(ds, mapping)
+            ds = list(apply_mapping(ds, mapping))
 
         # 1件目のデータを取得
         data = ds[0]
