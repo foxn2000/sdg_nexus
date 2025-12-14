@@ -314,9 +314,19 @@ class LLMClient:
             headers={},
             use_shared_transport=True,
         )
+
+        # DI（依存性注入）パターン：外部からtransportを注入
+        transport = SharedHttpTransport()
+        client = LLMClient(
+            base_url="http://localhost:8000",
+            api_key="your-api-key",
+            organization=None,
+            headers={},
+            transport=transport,  # 外部で管理されるtransportを注入
+        )
     """
 
-    # クラスレベルの共有トランスポート参照
+    # クラスレベルの共有トランスポート参照（後方互換性のため維持）
     _shared_transport: ClassVar[Optional[SharedHttpTransport]] = None
 
     def __init__(
@@ -329,6 +339,7 @@ class LLMClient:
         timeout_sec: Optional[float] = None,
         use_shared_transport: bool = False,
         http2: bool = True,
+        transport: Optional[SharedHttpTransport] = None,
     ):
         """
         LLMClientを初期化する。
@@ -338,10 +349,20 @@ class LLMClient:
             api_key: API認証キー
             organization: 組織ID（オプション）
             headers: 追加のHTTPヘッダー
-            timeout_sec: リクエストタイムアウト（秒、デフォルト: 60.0）
+            timeout_sec: リクエストタイムアウト（秒、デフォルト: 3600.0）
             use_shared_transport: 共有HTTPトランスポートを使用するかどうか
                                   （デフォルト: False、後方互換性のため）
+                                  transport引数が指定されている場合は無視される
             http2: HTTP/2を有効にするかどうか（use_shared_transport=True時のみ有効）
+            transport: 外部から注入するSharedHttpTransportインスタンス（オプション）
+                       指定された場合、use_shared_transportの設定に関わらず
+                       このtransportが使用される。上位のRunner/Executorが
+                       transportのライフサイクル（作成からacloseまで）を
+                       管理する場合に使用する。
+
+        Note:
+            transport引数を使用する場合、呼び出し元がtransportのライフサイクルを
+            管理する責任があります。aclose()の呼び出しを忘れないでください。
         """
         base = (base_url or "https://api.openai.com").rstrip("/")
         if base.endswith("/v1"):
@@ -350,8 +371,13 @@ class LLMClient:
             self.api_root = base + "/v1"
         self.api_key = api_key
         self.organization = organization
-        self.use_shared_transport = use_shared_transport
         self._http2 = http2
+
+        # 注入されたtransportを保持（ライフサイクル管理は呼び出し元の責任）
+        self._injected_transport: Optional[SharedHttpTransport] = transport
+
+        # transport引数が指定されている場合は use_shared_transport を True として扱う
+        self.use_shared_transport = use_shared_transport or (transport is not None)
 
         # Keep user-provided headers, but avoid duplicating standard headers that the SDK manages.
         custom_headers = dict(headers or {})
@@ -362,20 +388,26 @@ class LLMClient:
         # デフォルトタイムアウトを大幅に延長 (指定がない場合は1時間)
         self.timeout = timeout_sec if timeout_sec is not None else 3600.0
 
-        # 共有トランスポートの初期化または取得
-        if use_shared_transport:
+        # 使用するtransportを決定（DI優先、次にシングルトン）
+        effective_transport: Optional[SharedHttpTransport] = None
+        if transport is not None:
+            # DI: 外部から注入されたtransportを使用
+            effective_transport = transport
+        elif use_shared_transport:
+            # 従来の動作: シングルトンを使用
             self._init_shared_transport()
+            effective_transport = LLMClient._shared_transport
 
         # AsyncOpenAI クライアントを初期化
         # 共有トランスポート使用時はhttpxクライアントを注入
-        if use_shared_transport and LLMClient._shared_transport is not None:
+        if effective_transport is not None:
             # 共有httpxクライアントを使用するAsyncOpenAIクライアントを作成
             self.client = AsyncOpenAI(
                 base_url=self.api_root,
                 api_key=self.api_key,
                 organization=self.organization,
                 timeout=self.timeout,
-                http_client=LLMClient._shared_transport.get_http_client(),
+                http_client=effective_transport.get_http_client(),
             )
         else:
             # 標準のAsyncOpenAIクライアント
@@ -397,6 +429,16 @@ class LLMClient:
                 http2=self._http2,
                 read_timeout=self.timeout,
             )
+
+    @property
+    def injected_transport(self) -> Optional[SharedHttpTransport]:
+        """
+        外部から注入されたtransportを取得する。
+
+        Returns:
+            注入されたtransportインスタンス、または注入されていない場合はNone
+        """
+        return self._injected_transport
 
     @classmethod
     async def close_shared_transport(cls) -> None:
@@ -433,7 +475,9 @@ class LLMClient:
         # デフォルトのリトライ回数を増やしてタイムアウトエラーへの耐性を高める
         attempts = int((retry_cfg or {}).get("max_attempts", 10))
         backoff = (retry_cfg or {}).get("backoff", {})
-        initial_delay_ms = int(backoff.get("initial_ms", 1000))  # 初期待機時間も少し増やす
+        initial_delay_ms = int(
+            backoff.get("initial_ms", 1000)
+        )  # 初期待機時間も少し増やす
         factor = float(backoff.get("factor", 2.0))
         # 空返答リトライ機能（デフォルト: 有効）
         retry_on_empty = (retry_cfg or {}).get("retry_on_empty", True)

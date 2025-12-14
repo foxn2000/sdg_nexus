@@ -208,31 +208,47 @@ class RequestBatcher(Generic[T]):
                 print(f"Batcher error: {e}", file=sys.stderr)
 
     async def _collect_batch(self) -> List[PendingRequest[T]]:
-        """Collect requests into a batch."""
+        """
+        Collect requests into a batch.
+
+        最適化: asyncio.wait_for によるタスクラップのオーバーヘッドを回避するため、
+        get_nowait() + asyncio.sleep によるポーリング方式を採用。
+        """
         batch: List[PendingRequest[T]] = []
         batch_tokens = 0
         deadline = time.time() + self.max_wait_ms / 1000
 
-        # Wait for at least one request
-        try:
-            first = await asyncio.wait_for(
-                self._pending.get(),
-                timeout=0.1,  # Check running flag periodically
-            )
-            batch.append(first)
-            if self.max_tokens:
-                batch_tokens += self.token_estimator(first.payload)
-        except asyncio.TimeoutError:
+        # Wait for at least one request (check running flag every 100ms)
+        # asyncio.wait_for の代わりに get_nowait + sleep で実装
+        wait_deadline = time.time() + 0.1
+        while time.time() < wait_deadline:
+            try:
+                first = self._pending.get_nowait()
+                batch.append(first)
+                if self.max_tokens:
+                    batch_tokens += self.token_estimator(first.payload)
+                break
+            except asyncio.QueueEmpty:
+                # キューが空の場合、短い間隔でリトライ
+                remaining = wait_deadline - time.time()
+                if remaining > 0:
+                    await asyncio.sleep(min(0.01, remaining))  # 10ms間隔でポーリング
+                else:
+                    return []
+
+        # 最初のリクエストが取得できなかった場合
+        if not batch:
             return []
 
         # Collect more requests until batch is full or deadline reached
-        while len(batch) < self.max_batch_size and time.time() < deadline:
+        # asyncio.wait_for の代わりに get_nowait + 短い sleep で実装
+        while len(batch) < self.max_batch_size:
+            now = time.time()
+            if now >= deadline:
+                break
+
             try:
-                timeout = max(0, deadline - time.time())
-                pending = await asyncio.wait_for(
-                    self._pending.get(),
-                    timeout=timeout,
-                )
+                pending = self._pending.get_nowait()
 
                 # Check token limit if enabled
                 if self.max_tokens:
@@ -245,8 +261,14 @@ class RequestBatcher(Generic[T]):
 
                 batch.append(pending)
 
-            except asyncio.TimeoutError:
-                break
+            except asyncio.QueueEmpty:
+                # キューが空の場合、deadline まで短い間隔で待機
+                remaining = deadline - time.time()
+                if remaining > 0:
+                    # 最大10ms待機し、その後再度チェック
+                    await asyncio.sleep(min(0.01, remaining))
+                else:
+                    break
 
         # Sort by priority if mixed priorities
         if len(batch) > 1:
@@ -397,32 +419,48 @@ class AdaptiveRequestBatcher(RequestBatcher[T]):
         return self.max_batch_size
 
     async def _collect_batch(self) -> List[PendingRequest[T]]:
-        """Collect requests with adaptive batch size."""
+        """
+        Collect requests with adaptive batch size.
+
+        最適化: asyncio.wait_for によるタスクラップのオーバーヘッドを回避するため、
+        get_nowait() + asyncio.sleep によるポーリング方式を採用。
+        """
         batch: List[PendingRequest[T]] = []
         batch_tokens = 0
         deadline = time.time() + self.max_wait_ms / 1000
         current_max = self.current_batch_size
 
-        # Wait for at least one request
-        try:
-            first = await asyncio.wait_for(
-                self._pending.get(),
-                timeout=0.1,
-            )
-            batch.append(first)
-            if self.max_tokens:
-                batch_tokens += self.token_estimator(first.payload)
-        except asyncio.TimeoutError:
+        # Wait for at least one request (check running flag every 100ms)
+        # asyncio.wait_for の代わりに get_nowait + sleep で実装
+        wait_deadline = time.time() + 0.1
+        while time.time() < wait_deadline:
+            try:
+                first = self._pending.get_nowait()
+                batch.append(first)
+                if self.max_tokens:
+                    batch_tokens += self.token_estimator(first.payload)
+                break
+            except asyncio.QueueEmpty:
+                # キューが空の場合、短い間隔でリトライ
+                remaining = wait_deadline - time.time()
+                if remaining > 0:
+                    await asyncio.sleep(min(0.01, remaining))  # 10ms間隔でポーリング
+                else:
+                    return []
+
+        # 最初のリクエストが取得できなかった場合
+        if not batch:
             return []
 
         # Collect more requests until batch is full or deadline reached
-        while len(batch) < current_max and time.time() < deadline:
+        # asyncio.wait_for の代わりに get_nowait + 短い sleep で実装
+        while len(batch) < current_max:
+            now = time.time()
+            if now >= deadline:
+                break
+
             try:
-                timeout = max(0, deadline - time.time())
-                pending = await asyncio.wait_for(
-                    self._pending.get(),
-                    timeout=timeout,
-                )
+                pending = self._pending.get_nowait()
 
                 # Check token limit if enabled
                 if self.max_tokens:
@@ -434,8 +472,14 @@ class AdaptiveRequestBatcher(RequestBatcher[T]):
 
                 batch.append(pending)
 
-            except asyncio.TimeoutError:
-                break
+            except asyncio.QueueEmpty:
+                # キューが空の場合、deadline まで短い間隔で待機
+                remaining = deadline - time.time()
+                if remaining > 0:
+                    # 最大10ms待機し、その後再度チェック
+                    await asyncio.sleep(min(0.01, remaining))
+                else:
+                    break
 
         # Sort by priority
         if len(batch) > 1:
