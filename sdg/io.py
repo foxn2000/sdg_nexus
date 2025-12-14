@@ -21,6 +21,14 @@ from typing import (
 import aiofiles
 import aiofiles.os
 
+# orjsonによる高速JSONシリアライズ（フォールバック付き）
+try:
+    import orjson
+
+    _HAS_ORJSON = True
+except ImportError:
+    _HAS_ORJSON = False
+
 from .logger import get_logger
 
 # clean_jsonl_line is no longer used in AsyncBufferedWriter.write/write_many
@@ -96,7 +104,15 @@ class AsyncBufferedWriter:
 
     @staticmethod
     def _default_serializer(data: Dict[str, Any]) -> str:
-        """デフォルトのJSONシリアライザ。"""
+        """
+        デフォルトのJSONシリアライザ。
+
+        orjsonがインストールされている場合は高速なorjsonを使用し、
+        インストールされていない場合は標準jsonにフォールバックする。
+        """
+        if _HAS_ORJSON:
+            # orjson.dumpsはbytesを返すためデコードが必要
+            return orjson.dumps(data, option=orjson.OPT_NON_STR_KEYS).decode("utf-8")
         return json.dumps(data, ensure_ascii=False)
 
     async def __aenter__(self) -> "AsyncBufferedWriter":

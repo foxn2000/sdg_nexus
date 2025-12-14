@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os, sys
+from collections import ChainMap
 from typing import Any, Dict, List, Optional
 
 from ..config import AIBlock, SDGConfig, OutputDef
@@ -161,12 +162,9 @@ async def _execute_ai_block_single(
 ) -> Dict[str, Any]:
     """単一行のAIブロック実行"""
     # グローバル定数と変数をコンテキストに追加
-    # ローカルコンテキストが優先されるよう、最後に追加
-    extended_ctx = {
-        **exec_ctx.globals_const,
-        **exec_ctx.globals_vars,
-        **ctx,
-    }
+    # ローカルコンテキスト(ctx)が最優先されるようChainMapで論理結合
+    # 検索順序: ctx -> globals_vars -> globals_const（ゼロコピー）
+    extended_ctx = ChainMap(ctx, exec_ctx.globals_vars, exec_ctx.globals_const)
 
     # メッセージ構築
     msgs = []
