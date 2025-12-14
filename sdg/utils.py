@@ -4,6 +4,7 @@ import json
 import re
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,13 +31,15 @@ def ensure_json_obj(v: Any) -> Dict[str, Any]:
 def render_template(s: str, ctx: Dict[str, Any]) -> str:
     """Replace {VarName} with ctx[VarName] string values.
     Supports dotted keys like {foo.bar}. Missing keys -> empty string.
+    Also supports ChainMap and other Mapping types.
     """
 
     def repl(m: re.Match):
         key = m.group(1)
         cur = ctx
         for part in key.split("."):
-            if isinstance(cur, dict) and part in cur:
+            # Use Mapping instead of dict to support ChainMap and other mapping types
+            if isinstance(cur, Mapping) and part in cur:
                 cur = cur[part]
             else:
                 return ""
