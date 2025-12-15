@@ -15,6 +15,8 @@ from typing import (
     Iterator,
     List,
     Optional,
+    Set,
+    Tuple,
     Union,
 )
 
@@ -33,6 +35,74 @@ from .logger import get_logger
 
 # clean_jsonl_line is no longer used in AsyncBufferedWriter.write/write_many
 # since Dict input with json.dumps guarantees valid JSON format
+
+
+def load_processed_indices(output_path: str) -> Tuple[Set[int], int]:
+    """
+    既存の出力ファイルから処理済み行インデックスを読み取る。
+
+    出力ファイルの各行には `_row_index` フィールドが含まれていることを前提とする。
+    このフィールドを使用して、どの入力行が既に処理されたかを特定する。
+
+    Args:
+        output_path: 出力ファイルパス
+
+    Returns:
+        (処理済み行インデックスのセット, 処理済み行数) のタプル
+        ファイルが存在しない場合は (空のセット, 0) を返す
+
+    Note:
+        不正なJSONや _row_index がない行はスキップされる。
+    """
+    processed_indices: Set[int] = set()
+    processed_count = 0
+
+    if not os.path.exists(output_path):
+        return processed_indices, processed_count
+
+    try:
+        with open(output_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if "_row_index" in data:
+                        row_index = data["_row_index"]
+                        if isinstance(row_index, int):
+                            processed_indices.add(row_index)
+                            processed_count += 1
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    # 不正な行はスキップ
+                    continue
+    except IOError:
+        # ファイル読み取りエラーの場合は空を返す
+        return set(), 0
+
+    return processed_indices, processed_count
+
+
+def skip_processed_rows(
+    dataset: Iterable[Dict[str, Any]],
+    processed_indices: Set[int],
+) -> Iterator[Tuple[int, Dict[str, Any]]]:
+    """
+    処理済み行をスキップしながらデータセットをイテレートする。
+
+    入力データセットの各行に対して、その行インデックスを付与しながら、
+    処理済み行をスキップして未処理行のみを yield する。
+
+    Args:
+        dataset: 入力データセット（辞書のイテラブル）
+        processed_indices: 処理済み行インデックスのセット
+
+    Yields:
+        (行インデックス, データ行) のタプル（未処理行のみ）
+    """
+    for row_index, row in enumerate(dataset):
+        if row_index not in processed_indices:
+            yield row_index, row
 
 
 class AsyncBufferedWriter:
@@ -67,6 +137,7 @@ class AsyncBufferedWriter:
         encoding: str = "utf-8",
         serializer: Optional[Callable[[Dict[str, Any]], str]] = None,
         clean_output: bool = True,
+        append: bool = False,
     ):
         """
         AsyncBufferedWriterを初期化する。
@@ -81,6 +152,8 @@ class AsyncBufferedWriter:
             encoding: ファイルエンコーディング（デフォルト: utf-8）
             serializer: カスタムシリアライザ関数（デフォルト: JSON）
             clean_output: 出力をクリーニングするか（デフォルト: True）
+            append: 追記モードで開くか（デフォルト: False）
+                   True の場合、既存ファイルに追記する（処理再開時に使用）
         """
         self._path = path
         self._buffer_size = buffer_size
@@ -89,6 +162,7 @@ class AsyncBufferedWriter:
         self._encoding = encoding
         self._serializer = serializer or self._default_serializer
         self._clean_output = clean_output
+        self._append = append
 
         # 内部状態
         self._buffer: List[str] = []
@@ -127,16 +201,22 @@ class AsyncBufferedWriter:
     async def open(self) -> None:
         """
         ファイルを開き、定期フラッシュタスクを開始する。
+
+        追記モード（append=True）の場合は既存ファイルに追記し、
+        そうでない場合は新規ファイルとして開く（既存内容は上書き）。
         """
         # ディレクトリを作成
         dir_name = os.path.dirname(self._path)
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
 
+        # ファイルモードを決定（追記 or 上書き）
+        file_mode = "a" if self._append else "w"
+
         # ファイルを開く
         self._file = await aiofiles.open(
             self._path,
-            mode="w",
+            mode=file_mode,
             encoding=self._encoding,
         )
         self._last_flush_time = time.time()

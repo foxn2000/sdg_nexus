@@ -15,9 +15,9 @@ mabel:
 # モデル設定（qwen3 - 出力形式: <think>思考</think>回答）
 models:
   - name: qwen3
-    api_model: "qwen3:30b-a3b-thinking-2507-q4_K_M"
+    api_model: "qwen3"
     api_key: "sk-local"
-    base_url: http://localhost:11434/v1
+    base_url: http://localhost:8000/v1
     request_defaults:
       temperature: 0.7
       max_tokens: 4096

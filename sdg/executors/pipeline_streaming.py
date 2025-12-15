@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from ..config import SDGConfig, PyBlock
 from .core import ExecutionContext, StreamingResult
@@ -29,6 +29,8 @@ async def run_pipeline_streaming(
     max_cache_size: int = 500,
     enable_memory_optimization: bool = False,
     enable_memory_monitoring: bool = False,
+    # 処理再開オプション
+    processed_indices: Optional[Set[int]] = None,
 ):
     """
     ストリーミング版パイプライン - 完了した行から順次yield
@@ -44,10 +46,14 @@ async def run_pipeline_streaming(
         max_cache_size: コンテキストキャッシュの最大サイズ
         enable_memory_optimization: メモリ最適化を有効化
         enable_memory_monitoring: メモリ使用状況監視を有効化
+        processed_indices: 処理済み行インデックスのセット（再開時に使用）
+            このセットに含まれるインデックスの行はスキップされる
 
     Yields:
         StreamingResult: 各行の処理結果
     """
+    # 処理済みインデックスのセットを初期化
+    skip_indices = processed_indices or set()
     # モデルクライアント構築
     clients = _build_clients(cfg)
 
@@ -128,6 +134,9 @@ async def run_pipeline_streaming(
             # Phase 2: 階層的スケジューリングでタスクを段階的に起動
             tasks = []
             async for item in scheduler.schedule(dataset):
+                # 処理済みインデックスをスキップ
+                if item.index in skip_indices:
+                    continue
                 task = asyncio.create_task(process_row(item.index, item.data))
                 tasks.append(task)
                 total_started += 1
@@ -144,6 +153,9 @@ async def run_pipeline_streaming(
             # 従来の動作: イテラブルからタスクを作成（省メモリ版）
             tasks = []
             for i, row in enumerate(dataset):
+                # 処理済みインデックスをスキップ（元のインデックスを維持）
+                if i in skip_indices:
+                    continue
                 task = asyncio.create_task(process_row(i, row))
                 tasks.append(task)
                 total_started += 1

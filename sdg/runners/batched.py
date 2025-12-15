@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
-from typing import Any, Dict, Iterable, Optional
+import os
+from typing import Any, Dict, Iterable, Optional, Set
 
 from ..config import load_config
 from ..executors import run_pipeline_streaming_adaptive_batched
@@ -12,6 +13,7 @@ from ..io import (
     read_csv,
     read_hf_dataset,
     apply_mapping,
+    load_processed_indices,
 )
 
 
@@ -41,6 +43,9 @@ async def _run_streaming_adaptive_batched_async(
     enable_memory_monitoring: bool = False,
     # Total count (optional, for progress display)
     total: Optional[int] = None,
+    # 処理再開オプション
+    processed_indices: Optional[Set[int]] = None,
+    append: bool = False,
 ):
     """
     バッチング付き適応的並行性制御ストリーミング版パイプライン実行（非同期）。
@@ -81,6 +86,7 @@ async def _run_streaming_adaptive_batched_async(
         buffer_size=buffer_size,
         flush_interval=flush_interval,
         clean_output=clean_output,
+        append=append,
     ) as writer:
         if progress:
             with progress:
@@ -111,6 +117,7 @@ async def _run_streaming_adaptive_batched_async(
                     enable_memory_optimization=enable_memory_optimization,
                     max_cache_size=max_cache_size,
                     enable_memory_monitoring=enable_memory_monitoring,
+                    processed_indices=processed_indices,
                 ):
                     completed += 1
 
@@ -150,6 +157,7 @@ async def _run_streaming_adaptive_batched_async(
                 enable_memory_optimization=enable_memory_optimization,
                 max_cache_size=max_cache_size,
                 enable_memory_monitoring=enable_memory_monitoring,
+                processed_indices=processed_indices,
             ):
                 completed += 1
 
@@ -265,6 +273,26 @@ def run_streaming_adaptive_batched(
         "retry_on_empty": retry_on_empty,
     }
 
+    # 処理再開のための既存出力ファイルチェック
+    processed_indices: Optional[Set[int]] = None
+    append = False
+    logger = get_logger()
+
+    if os.path.exists(output_path):
+        # 既存の出力ファイルから処理済み行のインデックスを読み込む
+        processed_indices, processed_count = load_processed_indices(output_path)
+        if processed_count > 0:
+            append = True
+            if show_progress:
+                if logger.locale == "ja":
+                    logger.info(
+                        f"既存の出力ファイルを検出しました。{processed_count}件の処理済みデータから再開します。"
+                    )
+                else:
+                    logger.info(
+                        f"Detected existing output file. Resuming from {processed_count} processed records."
+                    )
+
     # load data and count lines for progress display
     total: Optional[int] = None
     if input_path:
@@ -295,8 +323,15 @@ def run_streaming_adaptive_batched(
     if mapping:
         ds = apply_mapping(ds, mapping)
 
-    # Print dataset info
-    logger = get_logger()
+    # 残り処理件数を計算（プログレス表示用）
+    processed_count = len(processed_indices) if processed_indices else 0
+    remaining_count: Optional[int] = None
+    if total is not None:
+        remaining_count = total - processed_count
+        if remaining_count < 0:
+            remaining_count = 0
+
+    # Print dataset info (loggerは既に上で取得済み)
     if show_progress:
         subtitle = (
             "Adaptive concurrency control with request batching"
@@ -307,10 +342,15 @@ def run_streaming_adaptive_batched(
 
         # 総数の表示（不明な場合は「不明」と表示）
         total_str = str(total) if total is not None else "unknown"
+        remaining_str = (
+            str(remaining_count) if remaining_count is not None else "unknown"
+        )
         if logger.locale == "ja":
             config_info = {
                 "入力データ数": total_str
                 + (f" (--max-inputs {max_inputs}で制限)" if max_inputs else ""),
+                "処理済み": processed_count,
+                "残り": remaining_str,
                 "最大並行数": max_concurrent,
                 "最小並行数": min_concurrent,
                 "目標レイテンシ": f"{target_latency_ms}ms",
@@ -323,6 +363,8 @@ def run_streaming_adaptive_batched(
             config_info = {
                 "Input Data Count": total_str
                 + (f" (limited by --max-inputs {max_inputs})" if max_inputs else ""),
+                "Already Processed": processed_count,
+                "Remaining": remaining_str,
                 "Max Concurrency": max_concurrent,
                 "Min Concurrency": min_concurrent,
                 "Target Latency": f"{target_latency_ms}ms",
@@ -354,6 +396,8 @@ def run_streaming_adaptive_batched(
             enable_memory_optimization=enable_memory_optimization,
             max_cache_size=max_cache_size,
             enable_memory_monitoring=enable_memory_monitoring,
-            total=total,
+            total=remaining_count,
+            processed_indices=processed_indices,
+            append=append,
         )
     )

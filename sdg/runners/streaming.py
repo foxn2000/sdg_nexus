@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
-from typing import Any, Dict, Iterable, Optional
+import os
+from typing import Any, Dict, Iterable, Optional, Set
 
 from ..config import load_config
 from ..executors import run_pipeline_streaming
@@ -12,6 +13,7 @@ from ..io import (
     read_csv,
     read_hf_dataset,
     apply_mapping,
+    load_processed_indices,
 )
 
 
@@ -35,6 +37,9 @@ async def _run_streaming_async(
     enable_memory_monitoring: bool = False,
     # Total count (optional, for progress display)
     total: Optional[int] = None,
+    # Resume options
+    processed_indices: Optional[Set[int]] = None,
+    append: bool = False,
 ):
     """
     ストリーミング版パイプライン実行（非同期）。
@@ -53,6 +58,8 @@ async def _run_streaming_async(
         flush_interval: 定期フラッシュ間隔（秒）
         clean_output: 出力をクリーニングするか
         total: 総データ数（不明な場合はNone）
+        processed_indices: 処理済み行インデックスのセット（再開時に使用）
+        append: 追記モードで開くか（再開時はTrue）
 
     Returns:
         (完了数, エラー数) のタプル
@@ -69,6 +76,7 @@ async def _run_streaming_async(
         buffer_size=buffer_size,
         flush_interval=flush_interval,
         clean_output=clean_output,
+        append=append,
     ) as writer:
         if progress:
             with progress:
@@ -91,6 +99,7 @@ async def _run_streaming_async(
                     enable_memory_optimization=enable_memory_optimization,
                     max_cache_size=max_cache_size,
                     enable_memory_monitoring=enable_memory_monitoring,
+                    processed_indices=processed_indices,
                 ):
                     completed += 1
 
@@ -126,6 +135,7 @@ async def _run_streaming_async(
                 enable_memory_optimization=enable_memory_optimization,
                 max_cache_size=max_cache_size,
                 enable_memory_monitoring=enable_memory_monitoring,
+                processed_indices=processed_indices,
             ):
                 completed += 1
 
@@ -233,6 +243,27 @@ def run_streaming(
         "retry_on_empty": retry_on_empty,
     }
 
+    # 初期化: 再開機能用変数
+    logger = get_logger()
+    processed_indices: Set[int] = set()
+    processed_count = 0
+    append_mode = False
+
+    # 既存の出力ファイルをチェック（再開機能）
+    if os.path.exists(output_path):
+        processed_indices, processed_count = load_processed_indices(output_path)
+        if processed_count > 0:
+            append_mode = True
+            if show_progress:
+                if logger.locale == "ja":
+                    logger.info(
+                        f"既存の出力ファイルを検出: {processed_count}件の処理済みデータがあります。続きから再開します。"
+                    )
+                else:
+                    logger.info(
+                        f"Existing output file detected: {processed_count} records already processed. Resuming from where it left off."
+                    )
+
     # load data and count lines for progress display
     total: Optional[int] = None
     if input_path:
@@ -263,8 +294,14 @@ def run_streaming(
     if mapping:
         ds = apply_mapping(ds, mapping)
 
+    # 残り処理件数を計算（プログレス表示用）
+    remaining_count: Optional[int] = None
+    if total is not None:
+        remaining_count = total - processed_count
+        if remaining_count < 0:
+            remaining_count = 0
+
     # Print dataset info
-    logger = get_logger()
     if show_progress:
         subtitle = (
             "Fixed concurrency streaming processing"
@@ -275,10 +312,15 @@ def run_streaming(
 
         # 総数の表示（不明な場合は「不明」と表示）
         total_str = str(total) if total is not None else "unknown"
+        remaining_str = (
+            str(remaining_count) if remaining_count is not None else "unknown"
+        )
         if logger.locale == "ja":
             config_info = {
                 "入力データ数": total_str
                 + (f" (--max-inputs {max_inputs}で制限)" if max_inputs else ""),
+                "処理済み": processed_count,
+                "残り": remaining_str,
                 "並行処理数": max_concurrent,
             }
             logger.table("実行設定", config_info)
@@ -286,6 +328,8 @@ def run_streaming(
             config_info = {
                 "Input Data Count": total_str
                 + (f" (limited by --max-inputs {max_inputs})" if max_inputs else ""),
+                "Already Processed": processed_count,
+                "Remaining": remaining_str,
                 "Concurrency": max_concurrent,
             }
             logger.table("Execution Configuration", config_info)
@@ -306,6 +350,8 @@ def run_streaming(
             enable_memory_optimization=enable_memory_optimization,
             max_cache_size=max_cache_size,
             enable_memory_monitoring=enable_memory_monitoring,
-            total=total,
+            total=remaining_count,
+            processed_indices=processed_indices,
+            append=append_mode,
         )
     )

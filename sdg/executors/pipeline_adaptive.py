@@ -1,7 +1,7 @@
 from __future__ import annotations
 import asyncio
 import time
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from ..config import SDGConfig, PyBlock
 from .core import ExecutionContext, StreamingResult
@@ -46,6 +46,8 @@ async def run_pipeline_streaming_adaptive(
     max_cache_size: int = 500,
     enable_memory_optimization: bool = False,
     enable_memory_monitoring: bool = False,
+    # 処理再開オプション
+    processed_indices: Optional[Set[int]] = None,
 ):
     """
     適応的並行性制御付きストリーミング版パイプライン
@@ -68,10 +70,15 @@ async def run_pipeline_streaming_adaptive(
         max_cache_size: コンテキストキャッシュの最大サイズ
         enable_memory_optimization: メモリ最適化を有効化
         enable_memory_monitoring: メモリ使用状況監視を有効化
+        processed_indices: 処理済み行インデックスのセット（再開時に使用）
+            このセットに含まれるインデックスの行はスキップされる
 
     Yields:
         StreamingResult: 各行の処理結果
     """
+    # 処理済みインデックスのセットを初期化
+    skip_indices = processed_indices or set()
+
     if not ADAPTIVE_AVAILABLE:
         # Fall back to standard streaming if adaptive module not available
         async for result in run_pipeline_streaming(
@@ -85,6 +92,7 @@ async def run_pipeline_streaming_adaptive(
             max_cache_size=max_cache_size,
             enable_memory_optimization=enable_memory_optimization,
             enable_memory_monitoring=enable_memory_monitoring,
+            processed_indices=processed_indices,
         ):
             yield result
         return
@@ -232,6 +240,8 @@ async def run_pipeline_streaming_adaptive(
         新しいタスクを追加する。エラー発生時はセマフォ容量が下がるため、
         新規タスクの起動も自動的に抑制される。
 
+        処理済みインデックス（skip_indices）はスキップされ、元のインデックスが維持される。
+
         Args:
             data_iter: データのイテレータ
         """
@@ -239,6 +249,7 @@ async def run_pipeline_streaming_adaptive(
         tasks: List[asyncio.Task] = []
         active_count = 0
         data_exhausted = False
+        current_index = 0  # 元のインデックスを追跡
 
         # イテレータをイテレート可能にする
         data_iterator = iter(data_iter)
@@ -263,7 +274,13 @@ async def run_pipeline_streaming_adaptive(
             for _ in range(slots_to_fill):
                 try:
                     row_data = next(data_iterator)
-                    row_index = total_started
+                    row_index = current_index
+                    current_index += 1
+
+                    # 処理済みインデックスをスキップ
+                    if row_index in skip_indices:
+                        continue
+
                     task = asyncio.create_task(process_row(row_index, row_data))
                     tasks.append(task)
                     total_started += 1
@@ -307,6 +324,9 @@ async def run_pipeline_streaming_adaptive(
             # Phase 2: 階層的スケジューリングでタスクを段階的に起動
             tasks = []
             async for item in scheduler.schedule(dataset):
+                # 処理済みインデックスをスキップ
+                if item.index in skip_indices:
+                    continue
                 task = asyncio.create_task(process_row(item.index, item.data))
                 tasks.append(task)
                 total_started += 1
